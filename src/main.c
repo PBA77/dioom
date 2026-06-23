@@ -17,14 +17,24 @@
 #define SPRITE_FRAMES 4
 #define MONSTER_TYPES 3
 #define PROJECTILE_SIZE 32
-#define MAX_PROJECTILES 12
+#define MAX_PROJECTILES 20
 #define MAX_MONSTERS 10
-#define MAX_ITEMS 12
+#define MAX_ITEMS 20
+#define MAX_TORCHES 26
 #define PLAYER_MAX_HEALTH 160
 #define START_AMMO 48
+#define START_FIREBALL_AMMO 0
+#define MAX_FIREBALL_AMMO 24
 #define PLAYER_DAMAGE 2
 #define SHOT_COOLDOWN_TIME 0.24
+#define FIREBALL_COOLDOWN_TIME 0.75
 #define WEAPON_FLASH_TIME 0.18
+#define FIREBALL_FLASH_TIME 0.26
+#define FIREBALL_DIRECT_DAMAGE 5
+#define FIREBALL_SPLASH_DAMAGE 4
+#define FIREBALL_RADIUS 1.25
+#define FOG_DENSITY 0.165
+#define FOG_PASS_STRENGTH 1.10
 #define MAP_W 24
 #define MAP_H 24
 #define TEXTURE_ATLAS_PATH "assets/textures.ppm"
@@ -38,6 +48,31 @@ typedef struct {
     double x;
     double y;
 } Vec2;
+
+enum {
+    WEAPON_PISTOL = 0,
+    WEAPON_FIREBALL = 1,
+};
+
+enum {
+    PROJECTILE_ENEMY_BOLT = 0,
+    PROJECTILE_PLAYER_FIREBALL = 1,
+    PROJECTILE_EXPLOSION = 2,
+};
+
+enum {
+    PROJECTILE_OWNER_ENEMY = 0,
+    PROJECTILE_OWNER_PLAYER = 1,
+    PROJECTILE_OWNER_NONE = 2,
+};
+
+enum {
+    ITEM_HEALTH = 0,
+    ITEM_AMMO = 1,
+    ITEM_RAPID = 2,
+    ITEM_DAMAGE = 3,
+    ITEM_FIREBALL = 4,
+};
 
 typedef struct {
     Vec2 pos;
@@ -60,10 +95,15 @@ typedef struct {
     double alert_timer;
     double strafe_timer;
     int strafe_dir;
+    double pain_timer;
 } Monster;
 
 typedef struct {
     int active;
+    int owner;
+    int type;
+    int damage;
+    double radius;
     Vec2 pos;
     Vec2 vel;
     double life;
@@ -76,6 +116,10 @@ typedef struct {
 } Item;
 
 typedef struct {
+    Vec2 pos;
+} Torch;
+
+typedef struct {
     Monster monsters[MAX_MONSTERS];
     int monster_count;
     Projectile projectiles[MAX_PROJECTILES];
@@ -83,6 +127,9 @@ typedef struct {
     double time;
     int player_health;
     int ammo;
+    int fireball_ammo;
+    int selected_weapon;
+    int fireball_unlocked;
     int kills;
     double shot_cooldown;
     double weapon_flash;
@@ -134,6 +181,35 @@ static const int world_map[MAP_H][MAP_W] = {
     {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
 };
 
+static const Torch torches[MAX_TORCHES] = {
+    {{2.5, 1.08}},
+    {{8.5, 1.08}},
+    {{14.5, 1.08}},
+    {{21.5, 1.08}},
+    {{1.08, 5.5}},
+    {{22.92, 5.5}},
+    {{1.08, 10.5}},
+    {{22.92, 10.5}},
+    {{1.08, 16.5}},
+    {{22.92, 16.5}},
+    {{4.5, 22.92}},
+    {{10.5, 22.92}},
+    {{16.5, 22.92}},
+    {{21.5, 22.92}},
+    {{6.92, 3.5}},
+    {{10.92, 4.5}},
+    {{16.08, 5.5}},
+    {{8.5, 7.08}},
+    {{12.5, 7.08}},
+    {{18.08, 8.5}},
+    {{5.92, 10.5}},
+    {{13.5, 10.92}},
+    {{16.92, 12.5}},
+    {{9.08, 15.5}},
+    {{16.08, 16.5}},
+    {{11.5, 18.08}},
+};
+
 static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b)
 {
     return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
@@ -167,6 +243,37 @@ static uint32_t mix_color(uint32_t a, uint32_t b, double t)
         clamp_u8((int)(ar + (br - ar) * t)),
         clamp_u8((int)(ag + (bg - ag) * t)),
         clamp_u8((int)(ab + (bb - ab) * t)));
+}
+
+static double clamp01(double v)
+{
+    if (v < 0.0) return 0.0;
+    if (v > 1.0) return 1.0;
+    return v;
+}
+
+static double smooth01(double v)
+{
+    v = clamp01(v);
+    return v * v * (3.0 - 2.0 * v);
+}
+
+static uint32_t fog_color(void)
+{
+    return rgb(38, 46, 44);
+}
+
+static double fog_amount(double distance)
+{
+    if (distance <= 0.0) {
+        return 0.0;
+    }
+    return clamp01(1.0 - exp(-distance * FOG_DENSITY));
+}
+
+static uint32_t apply_fog(uint32_t color, double distance, double strength)
+{
+    return mix_color(color, fog_color(), fog_amount(distance) * clamp01(strength));
 }
 
 static void put_pixel(int x, int y, uint32_t color)
@@ -338,7 +445,33 @@ static int map_at(int x, int y)
     return world_map[y][x];
 }
 
-static void render_floor_ceiling(const Camera *cam)
+static double torch_light_at(double x, double y, double time)
+{
+    double light = 0.0;
+
+    for (int i = 0; i < MAX_TORCHES; ++i) {
+        double dx = x - torches[i].pos.x;
+        double dy = y - torches[i].pos.y;
+        double dist2 = dx * dx + dy * dy;
+        if (dist2 > 18.0) {
+            continue;
+        }
+
+        double fade = 1.0 - smooth01((dist2 - 5.0) / 13.0);
+        double flicker = 1.04 + sin(time * 7.0 + i * 1.73) * 0.10 + sin(time * 13.0 + i * 0.41) * 0.05;
+        light += flicker * 1.45 * fade / (1.0 + dist2 * 0.62);
+    }
+
+    return clamp01(light);
+}
+
+static uint32_t apply_torch_light(uint32_t color, double base_light, double torch_light, double tint)
+{
+    uint32_t lit = shade(color, base_light + torch_light);
+    return mix_color(lit, rgb(255, 132, 48), clamp01(torch_light * tint));
+}
+
+static void render_floor_ceiling(const Camera *cam, const GameState *game)
 {
     const int floor_tex = 6;
     const int ceil_tex = 3;
@@ -351,8 +484,8 @@ static void render_floor_ceiling(const Camera *cam)
         int p = y - SCREEN_H / 2;
         if (p == 0) {
             for (int x = 0; x < SCREEN_W; ++x) {
-                framebuffer[y * SCREEN_W + x] = rgb(35, 33, 32);
-                framebuffer[(SCREEN_H - y - 1) * SCREEN_W + x] = rgb(18, 18, 20);
+                framebuffer[y * SCREEN_W + x] = apply_fog(rgb(18, 17, 16), 9.0, 0.86);
+                framebuffer[(SCREEN_H - y - 1) * SCREEN_W + x] = apply_fog(rgb(9, 9, 10), 9.0, 0.82);
             }
             continue;
         }
@@ -363,7 +496,7 @@ static void render_floor_ceiling(const Camera *cam)
         double floor_step_y = row_distance * (ray_dir_y1 - ray_dir_y0) / SCREEN_W;
         double floor_x = cam->pos.x + row_distance * ray_dir_x0;
         double floor_y = cam->pos.y + row_distance * ray_dir_y0;
-        double light = 0.28 + 0.78 / (1.0 + row_distance * 0.08);
+        double light = 0.045 + 0.30 / (1.0 + row_distance * 0.17);
 
         for (int x = 0; x < SCREEN_W; ++x) {
             int cell_x = (int)floor(floor_x);
@@ -373,8 +506,11 @@ static void render_floor_ceiling(const Camera *cam)
 
             uint32_t floor_color = textures[floor_tex][ty * TEX_SIZE + tx];
             uint32_t ceil_color = textures[ceil_tex][ty * TEX_SIZE + tx];
-            framebuffer[y * SCREEN_W + x] = shade(floor_color, light * 0.78);
-            framebuffer[(SCREEN_H - y - 1) * SCREEN_W + x] = shade(ceil_color, light * 0.48);
+            double torch_light = torch_light_at(floor_x, floor_y, game->time);
+            uint32_t lit_floor = apply_torch_light(floor_color, light * 0.48, torch_light * 0.70, 0.26);
+            uint32_t lit_ceil = apply_torch_light(ceil_color, light * 0.18, torch_light * 0.26, 0.10);
+            framebuffer[y * SCREEN_W + x] = apply_fog(lit_floor, row_distance, 0.86);
+            framebuffer[(SCREEN_H - y - 1) * SCREEN_W + x] = apply_fog(lit_ceil, row_distance, 0.76);
 
             floor_x += floor_step_x;
             floor_y += floor_step_y;
@@ -475,21 +611,47 @@ static void render_monster(const Camera *cam, const Monster *monster)
             if (type < 0) type = 0;
             uint32_t color = monster_sprites[type][frame][tex_y * SPRITE_SIZE + tex_x];
             if (!is_sprite_key(color)) {
-                framebuffer[y * SCREEN_W + stripe] = shade(color, light);
+                uint32_t lit = shade(color, light);
+                if (monster->pain_timer > 0.0) {
+                    lit = mix_color(lit, rgb(255, 210, 118), clamp01(monster->pain_timer / 0.18));
+                }
+                framebuffer[y * SCREEN_W + stripe] = apply_fog(lit, depth, 0.82);
             }
         }
     }
 }
 
-static uint32_t projectile_texel(int tex_x, int tex_y)
+static uint32_t projectile_texel(const Projectile *projectile, int tex_x, int tex_y)
 {
     double dx = (tex_x + 0.5) - PROJECTILE_SIZE / 2.0;
     double dy = (tex_y + 0.5) - PROJECTILE_SIZE / 2.0;
     double dist = sqrt(dx * dx + dy * dy);
 
+    if (projectile->type == PROJECTILE_EXPLOSION) {
+        double ring = PROJECTILE_SIZE * (0.22 + projectile->life * 0.85);
+        if (dist > PROJECTILE_SIZE * 0.50 || dist < ring * 0.30) {
+            return 0;
+        }
+        if (((tex_x * 5 + tex_y * 3) & 7) < 3) {
+            return rgb(255, 188, 66);
+        }
+        return dist < ring ? rgb(255, 106, 28) : rgb(126, 42, 20);
+    }
+
     if (dist > PROJECTILE_SIZE * 0.48) {
         return 0;
     }
+
+    if (projectile->type == PROJECTILE_PLAYER_FIREBALL) {
+        if (dist < PROJECTILE_SIZE * 0.20) {
+            return rgb(255, 246, 156);
+        }
+        if (((tex_x * 13 + tex_y * 9) & 15) < 7) {
+            return rgb(255, 142, 34);
+        }
+        return rgb(198, 52, 22);
+    }
+
     if (dist < PROJECTILE_SIZE * 0.18) {
         return rgb(255, 248, 132);
     }
@@ -504,7 +666,9 @@ static void render_projectile(const Camera *cam, const Projectile *projectile)
     int sprite_screen_x;
     int sprite_h;
     double depth;
-    if (!project_sprite(cam, projectile->pos, 0.34, &sprite_screen_x, &sprite_h, &depth)) {
+    double scale = projectile->type == PROJECTILE_EXPLOSION ? projectile->radius * 0.90 :
+                   projectile->type == PROJECTILE_PLAYER_FIREBALL ? 0.48 : 0.34;
+    if (!project_sprite(cam, projectile->pos, scale, &sprite_screen_x, &sprite_h, &depth)) {
         return;
     }
 
@@ -519,7 +683,9 @@ static void render_projectile(const Camera *cam, const Projectile *projectile)
     if (draw_start_x < 0) draw_start_x = 0;
     if (draw_end_x >= SCREEN_W) draw_end_x = SCREEN_W - 1;
 
-    double light = 1.15 / (1.0 + depth * 0.03);
+    double light = projectile->type == PROJECTILE_EXPLOSION ? 1.55 :
+                   projectile->type == PROJECTILE_PLAYER_FIREBALL ? 1.35 / (1.0 + depth * 0.02) :
+                   1.15 / (1.0 + depth * 0.03);
     for (int stripe = draw_start_x; stripe <= draw_end_x; ++stripe) {
         if (depth >= z_buffer[stripe]) {
             continue;
@@ -537,9 +703,10 @@ static void render_projectile(const Camera *cam, const Projectile *projectile)
                 continue;
             }
 
-            uint32_t color = projectile_texel(tex_x, tex_y);
+            uint32_t color = projectile_texel(projectile, tex_x, tex_y);
             if (color != 0) {
-                framebuffer[y * SCREEN_W + stripe] = shade(color, light);
+                double fog_strength = projectile->type == PROJECTILE_EXPLOSION ? 0.12 : 0.28;
+                framebuffer[y * SCREEN_W + stripe] = apply_fog(shade(color, light), depth, fog_strength);
             }
         }
     }
@@ -557,26 +724,31 @@ static uint32_t item_texel(int type, int tex_x, int tex_y)
     }
 
     switch (type) {
-    case 0:
+    case ITEM_HEALTH:
         if (abs(tex_x - PROJECTILE_SIZE / 2) < 4 || abs(tex_y - PROJECTILE_SIZE / 2) < 4) {
             return rgb(245, 236, 218);
         }
         return border ? rgb(94, 12, 18) : rgb(192, 24, 34);
-    case 1:
+    case ITEM_AMMO:
         if ((tex_x / 4) & 1) {
             return rgb(234, 192, 74);
         }
         return border ? rgb(92, 54, 22) : rgb(166, 112, 38);
-    case 2:
+    case ITEM_RAPID:
         if (((tex_x + tex_y) & 7) < 3) {
             return rgb(136, 232, 255);
         }
         return border ? rgb(20, 62, 94) : rgb(42, 152, 210);
-    default:
+    case ITEM_DAMAGE:
         if (dist < PROJECTILE_SIZE * 0.18) {
             return rgb(255, 244, 160);
         }
         return border ? rgb(86, 20, 104) : rgb(186, 64, 230);
+    default:
+        if (dist < PROJECTILE_SIZE * 0.18 || ((tex_x + tex_y) & 7) == 0) {
+            return rgb(255, 228, 118);
+        }
+        return border ? rgb(88, 28, 16) : rgb(230, 82, 24);
     }
 }
 
@@ -622,7 +794,99 @@ static void render_item(const Camera *cam, const Item *item)
 
             uint32_t color = item_texel(item->type, tex_x, tex_y);
             if (color != 0) {
-                framebuffer[y * SCREEN_W + stripe] = shade(color, light);
+                framebuffer[y * SCREEN_W + stripe] = apply_fog(shade(color, light), depth, 0.72);
+            }
+        }
+    }
+}
+
+static uint32_t torch_texel(int tex_x, int tex_y, double time, int index)
+{
+    double flicker = sin(time * 16.0 + index * 0.71) * 1.6 + sin(time * 29.0 + index * 1.37) * 0.9;
+    double flame_x = tex_x - (PROJECTILE_SIZE / 2.0 + flicker);
+    double flame_y = tex_y - 10.0;
+    double flame_width = 8.5 - tex_y * 0.16 + sin(tex_y * 0.7 + time * 18.0 + index) * 0.9;
+
+    if (tex_y >= 2 && tex_y <= 23 && flame_width > 1.0) {
+        double flame_shape = fabs(flame_x) / flame_width + fabs(flame_y) / 18.0;
+        if (flame_shape < 0.74) {
+            if (flame_shape < 0.36) {
+                return rgb(255, 238, 132);
+            }
+            if (((tex_x + tex_y + index) & 3) == 0) {
+                return rgb(255, 172, 52);
+            }
+            return rgb(222, 78, 24);
+        }
+    }
+
+    if (tex_y >= 20 && tex_y <= 25 && tex_x >= 9 && tex_x <= 23) {
+        return rgb(92, 58, 36);
+    }
+    if (tex_y >= 24 && tex_y <= 30 && tex_x >= 14 && tex_x <= 18) {
+        return rgb(58, 50, 46);
+    }
+    if (tex_y >= 28 && tex_y <= 31 && tex_x >= 11 && tex_x <= 21) {
+        return rgb(42, 38, 36);
+    }
+
+    return 0;
+}
+
+static void render_torch(const Camera *cam, const Torch *torch, int index, double time)
+{
+    int sprite_screen_x;
+    int sprite_h;
+    double depth;
+    if (!project_sprite(cam, torch->pos, 0.50, &sprite_screen_x, &sprite_h, &depth)) {
+        return;
+    }
+
+    int sprite_w = sprite_h * 2 / 3;
+    if (sprite_w < 1) {
+        return;
+    }
+
+    int draw_start_y = SCREEN_H / 2 - sprite_h * 3 / 4;
+    int draw_end_y = draw_start_y + sprite_h;
+    int draw_start_x = -sprite_w / 2 + sprite_screen_x;
+    int draw_end_x = sprite_w / 2 + sprite_screen_x;
+
+    if (draw_start_y < 0) draw_start_y = 0;
+    if (draw_end_y >= SCREEN_H) draw_end_y = SCREEN_H - 1;
+    if (draw_start_x < 0) draw_start_x = 0;
+    if (draw_end_x >= SCREEN_W) draw_end_x = SCREEN_W - 1;
+
+    double light = 1.90 / (1.0 + depth * 0.020);
+    for (int stripe = draw_start_x; stripe <= draw_end_x; ++stripe) {
+        if (depth >= z_buffer[stripe]) {
+            continue;
+        }
+
+        int tex_x = (int)((stripe - (-sprite_w / 2.0 + sprite_screen_x)) * PROJECTILE_SIZE / sprite_w);
+        if (tex_x < 0 || tex_x >= PROJECTILE_SIZE) {
+            continue;
+        }
+
+        for (int y = draw_start_y; y <= draw_end_y; ++y) {
+            int d = (y - draw_start_y) * PROJECTILE_SIZE;
+            int tex_y = d / sprite_h;
+            if (tex_y < 0 || tex_y >= PROJECTILE_SIZE) {
+                continue;
+            }
+
+            double gx = (tex_x - PROJECTILE_SIZE / 2.0) / 15.0;
+            double gy = (tex_y - 12.0) / 18.0;
+            double glow = clamp01(1.0 - sqrt(gx * gx + gy * gy));
+            if (glow > 0.0) {
+                double amount = glow * 0.46 / (1.0 + depth * 0.035);
+                uint32_t current = framebuffer[y * SCREEN_W + stripe];
+                framebuffer[y * SCREEN_W + stripe] = mix_color(current, rgb(255, 146, 42), clamp01(amount));
+            }
+
+            uint32_t color = torch_texel(tex_x, tex_y, time, index);
+            if (color != 0) {
+                framebuffer[y * SCREEN_W + stripe] = apply_fog(shade(color, light), depth, 0.20);
             }
         }
     }
@@ -630,7 +894,7 @@ static void render_item(const Camera *cam, const Item *item)
 
 static void render_world_sprites(const Camera *cam, const GameState *game)
 {
-    SpriteDraw draws[MAX_MONSTERS + MAX_PROJECTILES + MAX_ITEMS];
+    SpriteDraw draws[MAX_MONSTERS + MAX_PROJECTILES + MAX_ITEMS + MAX_TORCHES];
     int count = 0;
 
     for (int i = 0; i < game->monster_count; ++i) {
@@ -663,6 +927,12 @@ static void render_world_sprites(const Camera *cam, const GameState *game)
         draws[count++] = (SpriteDraw){2, i, dx * dx + dy * dy};
     }
 
+    for (int i = 0; i < MAX_TORCHES; ++i) {
+        double dx = torches[i].pos.x - cam->pos.x;
+        double dy = torches[i].pos.y - cam->pos.y;
+        draws[count++] = (SpriteDraw){3, i, dx * dx + dy * dy};
+    }
+
     for (int i = 0; i < count - 1; ++i) {
         for (int j = i + 1; j < count; ++j) {
             if (draws[i].dist < draws[j].dist) {
@@ -679,8 +949,74 @@ static void render_world_sprites(const Camera *cam, const GameState *game)
             render_monster(cam, &game->monsters[draw.index]);
         } else if (draw.kind == 1) {
             render_item(cam, &game->items[draw.index]);
-        } else {
+        } else if (draw.kind == 2) {
             render_projectile(cam, &game->projectiles[draw.index]);
+        } else {
+            render_torch(cam, &torches[draw.index], draw.index, game->time);
+        }
+    }
+}
+
+static void render_volumetric_fog(const Camera *cam, const GameState *game)
+{
+    uint32_t fog = fog_color();
+
+    for (int x = 0; x < SCREEN_W; ++x) {
+        double wall_depth = z_buffer[x];
+        double camera_x = 2.0 * x / (double)SCREEN_W - 1.0;
+        double ray_dir_x = cam->dir.x + cam->plane.x * camera_x;
+        double ray_dir_y = cam->dir.y + cam->plane.y * camera_x;
+
+        for (int y = 0; y < SCREEN_H - 14; ++y) {
+            int from_horizon = abs(y - SCREEN_H / 2);
+            double pixel_depth = wall_depth;
+            if (from_horizon > 0) {
+                double row_depth = (0.5 * SCREEN_H) / from_horizon;
+                if (row_depth < pixel_depth) {
+                    pixel_depth = row_depth;
+                }
+            }
+
+            double pixel_fog = fog_amount(pixel_depth) * FOG_PASS_STRENGTH;
+            if (pixel_fog <= 0.002) {
+                continue;
+            }
+
+            double dy = fabs((y - SCREEN_H * 0.5) / (SCREEN_H * 0.5));
+            double horizon = clamp01(1.0 - dy);
+            double lower = y > SCREEN_H / 2 ? (y - SCREEN_H / 2.0) / (SCREEN_H / 2.0) : 0.0;
+            double ground = lower * lower;
+            double wave_a = sin(x * 0.047 + y * 0.013 + game->time * 0.72);
+            double wave_b = sin(x * 0.021 - y * 0.096 - game->time * 0.34);
+            double wave_c = sin(x * 0.111 + y * 0.041 + game->time * 0.19);
+            double cloud = clamp01((wave_a + wave_b * 0.85 + wave_c * 0.55 + 1.02) * 0.36);
+            cloud = cloud * cloud * (1.45 - cloud * 0.45);
+            double amount = pixel_fog * (0.08 + horizon * 0.34 + ground * 1.55) * (0.34 + cloud * 1.58);
+
+            if (amount > 0.004) {
+                uint32_t color = framebuffer[y * SCREEN_W + x];
+                framebuffer[y * SCREEN_W + x] = mix_color(color, fog, clamp01(amount));
+            }
+
+            if (pixel_depth > 0.35) {
+                double torch_scatter = 0.0;
+                int steps = 4;
+                for (int sample = 1; sample <= steps; ++sample) {
+                    double t = pixel_depth * (sample / (double)(steps + 1));
+                    Vec2 p = {
+                        cam->pos.x + ray_dir_x * t,
+                        cam->pos.y + ray_dir_y * t,
+                    };
+                    torch_scatter += torch_light_at(p.x, p.y, game->time) * (1.0 - sample * 0.10);
+                }
+
+                torch_scatter = clamp01(torch_scatter / steps);
+                double warm_amount = torch_scatter * pixel_fog * (0.10 + ground * 0.55 + cloud * 0.28);
+                if (warm_amount > 0.003) {
+                    uint32_t color = framebuffer[y * SCREEN_W + x];
+                    framebuffer[y * SCREEN_W + x] = mix_color(color, rgb(166, 78, 32), clamp01(warm_amount));
+                }
+            }
         }
     }
 }
@@ -699,7 +1035,7 @@ static void render_hit_flash(const GameState *game)
             }
 
             uint32_t color = framebuffer[y * SCREEN_W + x];
-            framebuffer[y * SCREEN_W + x] = mix_color(color, rgb(190, 18, 18), intensity * 0.55);
+            framebuffer[y * SCREEN_W + x] = mix_color(color, rgb(190, 18, 18), clamp01(intensity * 0.55));
         }
     }
 }
@@ -745,7 +1081,7 @@ static void render_shot_trace(const GameState *game)
     }
 
     double t = game->shot_trace / WEAPON_FLASH_TIME;
-    uint32_t core = mix_color(rgb(255, 120, 28), rgb(255, 245, 170), t);
+    uint32_t core = mix_color(rgb(255, 120, 28), rgb(255, 245, 170), clamp01(t));
     int jitter = (int)(sin(game->time * 80.0) * 2.0);
     draw_line(SCREEN_W / 2 + 6, SCREEN_H - 41, SCREEN_W / 2 + jitter, SCREEN_H / 2 + 2, core);
     draw_line(SCREEN_W / 2 + 7, SCREEN_H - 41, SCREEN_W / 2 + jitter + 1, SCREEN_H / 2 + 2, rgb(255, 210, 80));
@@ -754,11 +1090,27 @@ static void render_shot_trace(const GameState *game)
 static void render_weapon(const GameState *game)
 {
     int bob = (int)(sin(game->time * 7.5) * 2.0);
-    double fire_t = game->weapon_flash > 0.0 ? game->weapon_flash / WEAPON_FLASH_TIME : 0.0;
+    double flash_time = game->selected_weapon == WEAPON_FIREBALL ? FIREBALL_FLASH_TIME : WEAPON_FLASH_TIME;
+    double fire_t = game->weapon_flash > 0.0 ? game->weapon_flash / flash_time : 0.0;
     int recoil_y = (int)(fire_t * fire_t * 15.0);
     int recoil_x = (int)(sin(game->time * 120.0) * fire_t * 4.0);
     int x = SCREEN_W / 2 - 24 + recoil_x;
     int y = SCREEN_H - 42 + bob + recoil_y;
+
+    if (game->selected_weapon == WEAPON_FIREBALL) {
+        fill_rect(x + 22, y + 14, 20, 28, rgb(58, 34, 24));
+        fill_rect(x + 25, y + 8, 14, 30, rgb(108, 58, 32));
+        fill_rect(x + 18, y + 4, 28, 12, rgb(80, 34, 22));
+        fill_rect(x + 22, y + 6, 20, 7, rgb(168, 66, 28));
+        fill_rect(x + 27, y + 3, 10, 10, rgb(255, 140, 36));
+        fill_rect(x + 30, y + 5, 4, 4, rgb(255, 236, 128));
+        if (game->weapon_flash > 0.0) {
+            int flash = 16 + (int)(fire_t * 30.0);
+            fill_rect(x + 32 - flash / 2, y - 8, flash, flash, rgb(255, 98, 24));
+            fill_rect(x + 32 - flash / 4, y - 2, flash / 2, flash / 2, rgb(255, 238, 120));
+        }
+        return;
+    }
 
     fill_rect(x + 16, y + 4, 32, 12, rgb(42, 43, 46));
     fill_rect(x + 20, y + 0, 32, 6, rgb(80, 82, 86));
@@ -787,6 +1139,17 @@ static void render_hud(const GameState *game)
     int ammo_pips = game->ammo > 18 ? 18 : game->ammo;
     for (int i = 0; i < ammo_pips; ++i) {
         fill_rect(94 + i * 5, SCREEN_H - 11, 3, 8, rgb(204, 162, 64));
+    }
+
+    uint32_t pistol_slot = game->selected_weapon == WEAPON_PISTOL ? rgb(210, 180, 90) : rgb(62, 58, 48);
+    uint32_t fire_slot = game->selected_weapon == WEAPON_FIREBALL ? rgb(230, 94, 32) : rgb(64, 42, 32);
+    fill_rect(188, SCREEN_H - 12, 12, 10, pistol_slot);
+    fill_rect(191, SCREEN_H - 9, 6, 4, rgb(24, 24, 24));
+    fill_rect(204, SCREEN_H - 12, 12, 10, game->fireball_unlocked ? fire_slot : rgb(34, 30, 28));
+    fill_rect(207, SCREEN_H - 9, 6, 4, game->fireball_unlocked ? rgb(255, 162, 54) : rgb(18, 18, 18));
+    int fire_pips = game->fireball_ammo > 10 ? 10 : game->fireball_ammo;
+    for (int i = 0; i < fire_pips; ++i) {
+        fill_rect(222 + i * 4, SCREEN_H - 10, 2, 6, rgb(232, 92, 28));
     }
 
     for (int i = 0; i < game->monster_count; ++i) {
@@ -841,7 +1204,8 @@ static void render_minimap(const Camera *cam, const GameState *game)
         if (item->active && ix >= 0 && ix < MAP_W && iy >= 0 && iy < MAP_H && game->discovered[iy][ix]) {
             uint32_t c = item->type == 0 ? rgb(210, 42, 48) :
                          item->type == 1 ? rgb(220, 170, 64) :
-                         item->type == 2 ? rgb(54, 174, 230) : rgb(190, 70, 230);
+                         item->type == 2 ? rgb(54, 174, 230) :
+                         item->type == 4 ? rgb(230, 88, 28) : rgb(190, 70, 230);
             fill_rect(ox + ix * cell + 1, oy + iy * cell + 1, 2, 2, c);
         }
     }
@@ -862,7 +1226,7 @@ static void render_minimap(const Camera *cam, const GameState *game)
 
 static void render_scene(const Camera *cam, const GameState *game)
 {
-    render_floor_ceiling(cam);
+    render_floor_ceiling(cam, game);
 
     for (int x = 0; x < SCREEN_W; ++x) {
         double camera_x = 2.0 * x / (double)SCREEN_W - 1.0;
@@ -932,6 +1296,9 @@ static void render_scene(const Camera *cam, const GameState *game)
             : cam->pos.x + perp_wall_dist * ray_dir_x;
         wall_x -= floor(wall_x);
 
+        double hit_x = cam->pos.x + ray_dir_x * perp_wall_dist;
+        double hit_y = cam->pos.y + ray_dir_y * perp_wall_dist;
+
         int tex_x = (int)(wall_x * TEX_SIZE);
         if ((side == 0 && ray_dir_x > 0.0) || (side == 1 && ray_dir_y < 0.0)) {
             tex_x = TEX_SIZE - tex_x - 1;
@@ -940,19 +1307,22 @@ static void render_scene(const Camera *cam, const GameState *game)
         int tex_idx = (wall - 1) % TEX_COUNT;
         double step = (double)TEX_SIZE / line_h;
         double tex_pos = (draw_start - SCREEN_H / 2.0 + line_h / 2.0) * step;
-        double light = side == 1 ? 0.62 : 0.86;
-        light *= 1.0 / (1.0 + perp_wall_dist * 0.045);
+        double light = side == 1 ? 0.17 : 0.27;
+        light *= 1.0 / (1.0 + perp_wall_dist * 0.12);
+        double torch_light = torch_light_at(hit_x, hit_y, game->time) * (side == 1 ? 0.92 : 1.08);
         z_buffer[x] = perp_wall_dist;
 
         for (int y = draw_start; y <= draw_end; ++y) {
             int tex_y = ((int)tex_pos) & (TEX_SIZE - 1);
             tex_pos += step;
             uint32_t color = textures[tex_idx][tex_y * TEX_SIZE + tex_x];
-            framebuffer[y * SCREEN_W + x] = shade(color, light);
+            uint32_t lit = apply_torch_light(color, light, torch_light, 0.30);
+            framebuffer[y * SCREEN_W + x] = apply_fog(lit, perp_wall_dist, 1.0);
         }
     }
 
     render_world_sprites(cam, game);
+    render_volumetric_fog(cam, game);
     render_hit_flash(game);
     render_crosshair();
     render_shot_trace(game);
@@ -1030,6 +1400,79 @@ static int has_line_of_sight(Vec2 from, Vec2 to)
     return raycast_wall_distance(from, dir) + 0.12 >= dist;
 }
 
+static int monster_max_hp(int type)
+{
+    switch (type) {
+    case 0: return 7;
+    case 2: return 3;
+    default: return 4;
+    }
+}
+
+static double monster_patrol_speed(int type)
+{
+    switch (type) {
+    case 0: return 0.82;
+    case 2: return 1.32;
+    default: return 1.05;
+    }
+}
+
+static double monster_chase_speed(int type)
+{
+    switch (type) {
+    case 0: return 1.15;
+    case 2: return 2.05;
+    default: return 1.55;
+    }
+}
+
+static double monster_attack_speed(int type)
+{
+    switch (type) {
+    case 0: return 1.05;
+    case 2: return 2.25;
+    default: return 1.65;
+    }
+}
+
+static double monster_retreat_speed(int type)
+{
+    switch (type) {
+    case 0: return 0.75;
+    case 2: return 1.55;
+    default: return 1.25;
+    }
+}
+
+static double monster_preferred_distance(int type)
+{
+    switch (type) {
+    case 0: return 3.2;
+    case 2: return 2.4;
+    default: return 4.8;
+    }
+}
+
+static double monster_shot_cooldown(int type, int index)
+{
+    double offset = (index % 3) * 0.14;
+    switch (type) {
+    case 0: return 1.55 + offset;
+    case 2: return 1.35 + offset;
+    default: return 1.15 + offset;
+    }
+}
+
+static int monster_projectile_damage(int type)
+{
+    switch (type) {
+    case 0: return 18;
+    case 2: return 8;
+    default: return 12;
+    }
+}
+
 static void reveal_fog(GameState *game, const Camera *cam)
 {
     int cx = (int)cam->pos.x;
@@ -1061,6 +1504,9 @@ static void init_game(GameState *game)
     game->monster_count = MAX_MONSTERS;
     game->player_health = PLAYER_MAX_HEALTH;
     game->ammo = START_AMMO;
+    game->fireball_ammo = START_FIREBALL_AMMO;
+    game->selected_weapon = WEAPON_PISTOL;
+    game->fireball_unlocked = 0;
 
     const Vec2 starts[MAX_MONSTERS] = {
         {12.5, 8.5},
@@ -1075,18 +1521,26 @@ static void init_game(GameState *game)
         {21.5, 20.5},
     };
     const Item item_starts[MAX_ITEMS] = {
-        {1, 1, {4.5, 22.5}},
-        {1, 0, {9.5, 22.5}},
-        {1, 2, {5.5, 12.5}},
-        {1, 3, {12.5, 12.5}},
-        {1, 1, {20.5, 20.5}},
-        {1, 0, {3.5, 3.5}},
-        {1, 2, {18.5, 15.5}},
-        {1, 3, {20.5, 3.5}},
-        {1, 1, {1.5, 15.5}},
-        {1, 0, {16.5, 22.5}},
-        {1, 1, {14.5, 8.5}},
-        {1, 0, {18.5, 18.5}},
+        {1, ITEM_AMMO, {4.5, 22.5}},
+        {1, ITEM_HEALTH, {9.5, 22.5}},
+        {1, ITEM_RAPID, {5.5, 12.5}},
+        {1, ITEM_FIREBALL, {12.5, 12.5}},
+        {1, ITEM_AMMO, {20.5, 20.5}},
+        {1, ITEM_HEALTH, {3.5, 3.5}},
+        {1, ITEM_RAPID, {18.5, 15.5}},
+        {1, ITEM_DAMAGE, {20.5, 3.5}},
+        {1, ITEM_AMMO, {1.5, 15.5}},
+        {1, ITEM_HEALTH, {16.5, 22.5}},
+        {1, ITEM_AMMO, {14.5, 8.5}},
+        {1, ITEM_HEALTH, {18.5, 18.5}},
+        {1, ITEM_FIREBALL, {10.5, 2.5}},
+        {1, ITEM_AMMO, {6.5, 6.5}},
+        {1, ITEM_HEALTH, {14.5, 13.5}},
+        {1, ITEM_DAMAGE, {16.5, 16.5}},
+        {1, ITEM_FIREBALL, {9.5, 18.5}},
+        {1, ITEM_RAPID, {20.5, 12.5}},
+        {1, ITEM_AMMO, {3.5, 20.5}},
+        {1, ITEM_HEALTH, {13.5, 20.5}},
     };
 
     for (int i = 0; i < MAX_ITEMS; ++i) {
@@ -1102,13 +1556,14 @@ static void init_game(GameState *game)
         monster->route = i;
         static const int monster_types[MAX_MONSTERS] = {1, 1, 1, 0, 1, 1, 2, 1, 0, 1};
         monster->type = monster_types[i];
-        monster->hp = monster->type == 1 ? 4 : (monster->type == 0 ? 5 : 3);
+        monster->hp = monster_max_hp(monster->type);
         monster->facing = (Vec2){0.0, -1.0};
         monster->ai_state = 0;
         monster->last_seen = starts[i];
         monster->alert_timer = 0.0;
         monster->strafe_timer = 0.4 + i * 0.11;
         monster->strafe_dir = (i & 1) ? 1 : -1;
+        monster->pain_timer = 0.0;
     }
 }
 
@@ -1313,25 +1768,26 @@ static void update_monster(Monster *monster, const Camera *cam, double dt)
 
     monster->strafe_timer -= dt;
     if (monster->strafe_timer <= 0.0) {
-        monster->strafe_timer = 0.7 + 0.13 * (monster->route % 4);
+        monster->strafe_timer = (monster->type == 2 ? 0.38 : (monster->type == 0 ? 1.05 : 0.70)) + 0.09 * (monster->route % 4);
         monster->strafe_dir *= -1;
     }
 
     if (monster->ai_state == 2 && sees_player) {
         Vec2 dir_to_player = vec_norm(to_player);
-        double preferred = monster->type == 1 ? 4.8 : 3.8;
+        double preferred = monster_preferred_distance(monster->type);
         if (player_dist > preferred + 0.7) {
-            move_monster_toward(monster, cam->pos, 1.65, dt);
+            move_monster_toward(monster, cam->pos, monster_attack_speed(monster->type), dt);
         } else if (player_dist < preferred - 0.8) {
             Vec2 away = {
                 monster->pos.x - dir_to_player.x,
                 monster->pos.y - dir_to_player.y,
             };
-            move_monster_toward(monster, away, 1.25, dt);
+            move_monster_toward(monster, away, monster_retreat_speed(monster->type), dt);
         } else {
+            double strafe_speed = monster->type == 2 ? 1.55 : (monster->type == 0 ? 0.72 : 1.05);
             Vec2 side = {
-                -dir_to_player.y * monster->strafe_dir * 1.05 * dt,
-                dir_to_player.x * monster->strafe_dir * 1.05 * dt,
+                -dir_to_player.y * monster->strafe_dir * strafe_speed * dt,
+                dir_to_player.x * monster->strafe_dir * strafe_speed * dt,
             };
             move_monster_by(monster, side);
         }
@@ -1339,7 +1795,7 @@ static void update_monster(Monster *monster, const Camera *cam, double dt)
     }
 
     if (monster->ai_state == 1) {
-        if (move_monster_toward(monster, monster->last_seen, 1.55, dt)) {
+        if (move_monster_toward(monster, monster->last_seen, monster_chase_speed(monster->type), dt)) {
             Vec2 to_last_seen = {
                 monster->last_seen.x - monster->pos.x,
                 monster->last_seen.y - monster->pos.y,
@@ -1361,9 +1817,78 @@ static void update_monster(Monster *monster, const Camera *cam, double dt)
         monster->target_waypoint = (monster->target_waypoint + 1) % waypoint_count;
         return;
     }
-    if (!move_monster_toward(monster, target, 1.05, dt)) {
+    if (!move_monster_toward(monster, target, monster_patrol_speed(monster->type), dt)) {
         monster->target_waypoint = (monster->target_waypoint + 1) % waypoint_count;
     }
+}
+
+static void spawn_explosion(GameState *game, Vec2 pos, double radius)
+{
+    for (int i = 0; i < MAX_PROJECTILES; ++i) {
+        Projectile *p = &game->projectiles[i];
+        if (!p->active) {
+            memset(p, 0, sizeof(*p));
+            p->active = 1;
+            p->owner = PROJECTILE_OWNER_NONE;
+            p->type = PROJECTILE_EXPLOSION;
+            p->pos = pos;
+            p->life = 0.22;
+            p->radius = radius;
+            return;
+        }
+    }
+}
+
+static void damage_monster(GameState *game, Monster *monster, int damage, Vec2 source)
+{
+    if (!monster->active) {
+        return;
+    }
+
+    monster->hp -= damage;
+    monster->pain_timer = 0.18;
+    monster->alert_timer = 5.0;
+    Vec2 push = vec_norm((Vec2){
+        monster->pos.x - source.x,
+        monster->pos.y - source.y,
+    });
+    if (push.x != 0.0 || push.y != 0.0) {
+        move_monster_by(monster, (Vec2){push.x * 0.08, push.y * 0.08});
+    }
+
+    if (monster->hp <= 0) {
+        monster->active = 0;
+        game->kills += 1;
+        spawn_explosion(game, monster->pos, 0.80);
+    }
+}
+
+static void explode_player_fireball(GameState *game, Vec2 pos, int damage, double radius)
+{
+    double radius2 = radius * radius;
+
+    for (int i = 0; i < game->monster_count; ++i) {
+        Monster *monster = &game->monsters[i];
+        if (!monster->active) {
+            continue;
+        }
+
+        double dx = monster->pos.x - pos.x;
+        double dy = monster->pos.y - pos.y;
+        double dist2 = dx * dx + dy * dy;
+        if (dist2 > radius2) {
+            continue;
+        }
+
+        double dist = sqrt(dist2);
+        int splash = (int)ceil(damage * (1.0 - dist / radius));
+        if (splash < 1) {
+            splash = 1;
+        }
+        damage_monster(game, monster, splash, pos);
+    }
+
+    spawn_explosion(game, pos, radius);
 }
 
 static void spawn_monster_shot(GameState *game, const Monster *monster, const Camera *cam)
@@ -1380,7 +1905,12 @@ static void spawn_monster_shot(GameState *game, const Monster *monster, const Ca
     for (int i = 0; i < MAX_PROJECTILES; ++i) {
         Projectile *p = &game->projectiles[i];
         if (!p->active) {
+            memset(p, 0, sizeof(*p));
             p->active = 1;
+            p->owner = PROJECTILE_OWNER_ENEMY;
+            p->type = PROJECTILE_ENEMY_BOLT;
+            p->damage = monster_projectile_damage(monster->type);
+            p->radius = 0.0;
             p->pos = (Vec2){
                 monster->pos.x + dir.x * 0.55,
                 monster->pos.y + dir.y * 0.55,
@@ -1392,6 +1922,29 @@ static void spawn_monster_shot(GameState *game, const Monster *monster, const Ca
     }
 }
 
+static int spawn_player_fireball(GameState *game, const Camera *cam)
+{
+    for (int i = 0; i < MAX_PROJECTILES; ++i) {
+        Projectile *p = &game->projectiles[i];
+        if (!p->active) {
+            memset(p, 0, sizeof(*p));
+            p->active = 1;
+            p->owner = PROJECTILE_OWNER_PLAYER;
+            p->type = PROJECTILE_PLAYER_FIREBALL;
+            p->damage = FIREBALL_SPLASH_DAMAGE + (game->damage_timer > 0.0 ? 2 : 0);
+            p->radius = FIREBALL_RADIUS;
+            p->pos = (Vec2){
+                cam->pos.x + cam->dir.x * 0.48,
+                cam->pos.y + cam->dir.y * 0.48,
+            };
+            p->vel = (Vec2){cam->dir.x * 5.4, cam->dir.y * 5.4};
+            p->life = 2.4;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void update_projectiles(GameState *game, const Camera *cam, double dt)
 {
     for (int i = 0; i < MAX_PROJECTILES; ++i) {
@@ -1401,24 +1954,53 @@ static void update_projectiles(GameState *game, const Camera *cam, double dt)
         }
 
         p->life -= dt;
+        if (p->type == PROJECTILE_EXPLOSION) {
+            if (p->life <= 0.0) {
+                p->active = 0;
+            }
+            continue;
+        }
+
+        Vec2 old_pos = p->pos;
         p->pos.x += p->vel.x * dt;
         p->pos.y += p->vel.y * dt;
 
         if (p->life <= 0.0 || map_at((int)p->pos.x, (int)p->pos.y) != 0) {
+            if (p->type == PROJECTILE_PLAYER_FIREBALL) {
+                explode_player_fireball(game, old_pos, p->damage, p->radius);
+            }
             p->active = 0;
             continue;
         }
 
-        double dx = p->pos.x - cam->pos.x;
-        double dy = p->pos.y - cam->pos.y;
-        if (dx * dx + dy * dy < 0.18) {
-            p->active = 0;
-            game->player_health -= 12;
-            if (game->player_health <= 0) {
-                game->player_health = 0;
-                game->game_over = 1;
+        if (p->owner == PROJECTILE_OWNER_ENEMY) {
+            double dx = p->pos.x - cam->pos.x;
+            double dy = p->pos.y - cam->pos.y;
+            if (dx * dx + dy * dy < 0.18) {
+                p->active = 0;
+                game->player_health -= p->damage;
+                if (game->player_health <= 0) {
+                    game->player_health = 0;
+                    game->game_over = 1;
+                }
+                game->hit_flash = 0.18;
             }
-            game->hit_flash = 0.18;
+        } else if (p->owner == PROJECTILE_OWNER_PLAYER) {
+            for (int m = 0; m < game->monster_count; ++m) {
+                Monster *monster = &game->monsters[m];
+                if (!monster->active) {
+                    continue;
+                }
+                double dx = p->pos.x - monster->pos.x;
+                double dy = p->pos.y - monster->pos.y;
+                if (dx * dx + dy * dy < 0.36) {
+                    int direct = FIREBALL_DIRECT_DAMAGE + (game->damage_timer > 0.0 ? 2 : 0);
+                    damage_monster(game, monster, direct, p->pos);
+                    explode_player_fireball(game, p->pos, p->damage, p->radius);
+                    p->active = 0;
+                    break;
+                }
+            }
         }
     }
 }
@@ -1426,23 +2008,31 @@ static void update_projectiles(GameState *game, const Camera *cam, double dt)
 static void pickup_item(GameState *game, Item *item)
 {
     switch (item->type) {
-    case 0:
+    case ITEM_HEALTH:
         game->player_health += 45;
         if (game->player_health > PLAYER_MAX_HEALTH) {
             game->player_health = PLAYER_MAX_HEALTH;
         }
         break;
-    case 1:
+    case ITEM_AMMO:
         game->ammo += 18;
         if (game->ammo > 99) {
             game->ammo = 99;
         }
         break;
-    case 2:
+    case ITEM_RAPID:
         game->rapid_timer = 12.0;
         break;
-    default:
+    case ITEM_DAMAGE:
         game->damage_timer = 12.0;
+        break;
+    default:
+        game->fireball_unlocked = 1;
+        game->selected_weapon = WEAPON_FIREBALL;
+        game->fireball_ammo += 6;
+        if (game->fireball_ammo > MAX_FIREBALL_AMMO) {
+            game->fireball_ammo = MAX_FIREBALL_AMMO;
+        }
         break;
     }
 
@@ -1466,9 +2056,35 @@ static void update_items(GameState *game, const Camera *cam)
     }
 }
 
+static void select_weapon(GameState *game, int weapon)
+{
+    if (weapon == WEAPON_FIREBALL && !game->fireball_unlocked) {
+        return;
+    }
+    game->selected_weapon = weapon;
+}
+
 static void player_fire(GameState *game, const Camera *cam)
 {
-    if (game->game_over || game->victory || game->shot_cooldown > 0.0 || game->ammo <= 0) {
+    if (game->game_over || game->victory || game->shot_cooldown > 0.0) {
+        return;
+    }
+
+    if (game->selected_weapon == WEAPON_FIREBALL) {
+        if (!game->fireball_unlocked || game->fireball_ammo <= 0) {
+            return;
+        }
+        if (!spawn_player_fireball(game, cam)) {
+            return;
+        }
+        game->fireball_ammo -= 1;
+        game->shot_cooldown = game->rapid_timer > 0.0 ? FIREBALL_COOLDOWN_TIME * 0.70 : FIREBALL_COOLDOWN_TIME;
+        game->weapon_flash = FIREBALL_FLASH_TIME;
+        game->shot_trace = 0.0;
+        return;
+    }
+
+    if (game->ammo <= 0) {
         return;
     }
 
@@ -1509,11 +2125,7 @@ static void player_fire(GameState *game, const Camera *cam)
     if (best >= 0) {
         Monster *monster = &game->monsters[best];
         int damage = PLAYER_DAMAGE + (game->damage_timer > 0.0 ? 2 : 0);
-        monster->hp -= damage;
-        if (monster->hp <= 0) {
-            monster->active = 0;
-            game->kills += 1;
-        }
+        damage_monster(game, monster, damage, cam->pos);
     }
 }
 
@@ -1529,6 +2141,12 @@ static void update_game(GameState *game, const Camera *cam, double dt)
             monster->facing_lock -= dt;
             if (monster->facing_lock < 0.0) {
                 monster->facing_lock = 0.0;
+            }
+        }
+        if (monster->pain_timer > 0.0) {
+            monster->pain_timer -= dt;
+            if (monster->pain_timer < 0.0) {
+                monster->pain_timer = 0.0;
             }
         }
 
@@ -1551,7 +2169,7 @@ static void update_game(GameState *game, const Camera *cam, double dt)
             });
             monster->facing_lock = 0.45;
             spawn_monster_shot(game, monster, cam);
-            monster->shoot_timer += 1.15 + (i % 3) * 0.18;
+            monster->shoot_timer += monster_shot_cooldown(monster->type, i);
         }
         if (monster->shoot_timer <= 0.0) {
             monster->shoot_timer = 0.25;
@@ -1740,10 +2358,154 @@ static int verify_items_and_fog(void)
         return 0;
     }
 
+    int found_fireball = 0;
+    for (int i = 0; i < MAX_ITEMS; ++i) {
+        if (game.items[i].active && game.items[i].type == ITEM_FIREBALL) {
+            cam.pos = game.items[i].pos;
+            update_items(&game, &cam);
+            found_fireball = 1;
+            break;
+        }
+    }
+    if (!found_fireball || !game.fireball_unlocked || game.selected_weapon != WEAPON_FIREBALL || game.fireball_ammo <= 0) {
+        fprintf(stderr, "error: fireball pickup verification failed\n");
+        return 0;
+    }
+
     cam.pos = (Vec2){2.5, 22.5};
     reveal_fog(&game, &cam);
     if (!game.discovered[22][2] || !game.discovered[22][4]) {
         fprintf(stderr, "error: fog-of-war did not reveal the starting area\n");
+        return 0;
+    }
+
+    return 1;
+}
+
+static int verify_fireball_weapon(void)
+{
+    GameState game;
+    init_game(&game);
+    Camera cam = {
+        .pos = {2.5, 22.5},
+        .dir = {1.0, 0.0},
+        .plane = {0.0, 0.66},
+    };
+
+    select_weapon(&game, WEAPON_FIREBALL);
+    if (game.selected_weapon != WEAPON_PISTOL) {
+        fprintf(stderr, "error: locked fireball weapon was selected\n");
+        return 0;
+    }
+
+    game.fireball_unlocked = 1;
+    game.fireball_ammo = 2;
+    select_weapon(&game, WEAPON_FIREBALL);
+    if (game.selected_weapon != WEAPON_FIREBALL) {
+        fprintf(stderr, "error: unlocked fireball weapon was not selected\n");
+        return 0;
+    }
+
+    game.monster_count = 2;
+    game.monsters[0].active = 1;
+    game.monsters[0].hp = 10;
+    game.monsters[0].pos = (Vec2){6.0, 22.5};
+    game.monsters[1].active = 1;
+    game.monsters[1].hp = 10;
+    game.monsters[1].pos = (Vec2){6.2, 22.8};
+    memset(game.projectiles, 0, sizeof(game.projectiles));
+
+    player_fire(&game, &cam);
+    if (game.fireball_ammo != 1 || game.shot_cooldown <= 0.0) {
+        fprintf(stderr, "error: fireball did not consume ammo and set cooldown\n");
+        return 0;
+    }
+
+    for (int i = 0; i < 90; ++i) {
+        update_projectiles(&game, &cam, 1.0 / 60.0);
+    }
+
+    if (game.monsters[0].hp >= 10 || game.monsters[1].hp >= 10) {
+        fprintf(stderr, "error: fireball did not apply direct and splash damage\n");
+        return 0;
+    }
+
+    return 1;
+}
+
+static int verify_projectile_ownership(void)
+{
+    GameState game;
+    init_game(&game);
+    Camera cam = {
+        .pos = {2.5, 22.5},
+        .dir = {1.0, 0.0},
+        .plane = {0.0, 0.66},
+    };
+
+    game.monster_count = 1;
+    game.monsters[0].active = 1;
+    game.monsters[0].hp = 10;
+    game.monsters[0].pos = (Vec2){3.0, 22.5};
+    memset(game.projectiles, 0, sizeof(game.projectiles));
+    game.projectiles[0] = (Projectile){
+        .active = 1,
+        .owner = PROJECTILE_OWNER_ENEMY,
+        .type = PROJECTILE_ENEMY_BOLT,
+        .damage = 99,
+        .pos = game.monsters[0].pos,
+        .vel = {0.0, 0.0},
+        .life = 1.0,
+    };
+    update_projectiles(&game, &cam, 1.0 / 60.0);
+    if (game.monsters[0].hp != 10) {
+        fprintf(stderr, "error: enemy projectile damaged a monster\n");
+        return 0;
+    }
+
+    int health = game.player_health;
+    memset(game.projectiles, 0, sizeof(game.projectiles));
+    game.monster_count = 0;
+    game.projectiles[0] = (Projectile){
+        .active = 1,
+        .owner = PROJECTILE_OWNER_PLAYER,
+        .type = PROJECTILE_PLAYER_FIREBALL,
+        .damage = 99,
+        .radius = FIREBALL_RADIUS,
+        .pos = cam.pos,
+        .vel = {0.0, 0.0},
+        .life = 1.0,
+    };
+    update_projectiles(&game, &cam, 1.0 / 60.0);
+    if (game.player_health != health) {
+        fprintf(stderr, "error: player fireball damaged the player\n");
+        return 0;
+    }
+
+    return 1;
+}
+
+static int verify_monster_roles(void)
+{
+    GameState game;
+    init_game(&game);
+
+    for (int i = 0; i < game.monster_count; ++i) {
+        Monster *monster = &game.monsters[i];
+        if (monster->hp != monster_max_hp(monster->type)) {
+            fprintf(stderr, "error: monster %d hp does not match its role\n", i);
+            return 0;
+        }
+    }
+
+    if (!(monster_chase_speed(2) > monster_chase_speed(1) &&
+          monster_chase_speed(1) > monster_chase_speed(0))) {
+        fprintf(stderr, "error: monster role speeds are not ordered as expected\n");
+        return 0;
+    }
+    if (!(monster_projectile_damage(0) > monster_projectile_damage(1) &&
+          monster_projectile_damage(1) > monster_projectile_damage(2))) {
+        fprintf(stderr, "error: monster projectile damage roles are not ordered as expected\n");
         return 0;
     }
 
@@ -1779,6 +2541,67 @@ static int verify_sprite_sort_order(void)
 
     if (draws[0].kind != 0 || draws[1].kind != 1) {
         fprintf(stderr, "error: sprite sort order is not far-to-near across item/monster types\n");
+        return 0;
+    }
+    return 1;
+}
+
+static int verify_torches(void)
+{
+    for (int i = 0; i < MAX_TORCHES; ++i) {
+        Vec2 pos = torches[i].pos;
+        int cx = (int)pos.x;
+        int cy = (int)pos.y;
+        int near_wall =
+            map_at(cx - 1, cy) > 0 ||
+            map_at(cx + 1, cy) > 0 ||
+            map_at(cx, cy - 1) > 0 ||
+            map_at(cx, cy + 1) > 0;
+
+        if (!can_occupy(pos.x, pos.y, 0.04)) {
+            fprintf(stderr, "error: torch %d is placed inside a wall at %.2f %.2f\n", i, pos.x, pos.y);
+            return 0;
+        }
+        if (!near_wall) {
+            fprintf(stderr, "error: torch %d is not mounted next to a wall at %.2f %.2f\n", i, pos.x, pos.y);
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int verify_volumetric_fog(void)
+{
+    GameState game;
+    memset(&game, 0, sizeof(game));
+    game.time = 1.0;
+    Camera cam = {
+        .pos = {2.5, 22.5},
+        .dir = {1.0, 0.0},
+        .plane = {0.0, 0.66},
+    };
+
+    double near_fog = fog_amount(1.0);
+    double far_fog = fog_amount(12.0);
+    if (far_fog <= near_fog) {
+        fprintf(stderr, "error: distance fog does not increase with depth\n");
+        return 0;
+    }
+
+    for (int i = 0; i < SCREEN_W * SCREEN_H; ++i) {
+        framebuffer[i] = rgb(90, 72, 56);
+    }
+    for (int x = 0; x < SCREEN_W; ++x) {
+        z_buffer[x] = 12.0;
+    }
+
+    uint32_t before = framebuffer[(SCREEN_H / 2) * SCREEN_W + (SCREEN_W / 2)];
+    render_volumetric_fog(&cam, &game);
+    uint32_t after = framebuffer[(SCREEN_H / 2) * SCREEN_W + (SCREEN_W / 2)];
+
+    if (before == after) {
+        fprintf(stderr, "error: volumetric fog pass did not modify the framebuffer\n");
         return 0;
     }
     return 1;
@@ -1859,7 +2682,22 @@ static int dump_frame(const char *path)
     if (!verify_items_and_fog()) {
         return 1;
     }
+    if (!verify_fireball_weapon()) {
+        return 1;
+    }
+    if (!verify_projectile_ownership()) {
+        return 1;
+    }
+    if (!verify_monster_roles()) {
+        return 1;
+    }
     if (!verify_sprite_sort_order()) {
+        return 1;
+    }
+    if (!verify_torches()) {
+        return 1;
+    }
+    if (!verify_volumetric_fog()) {
         return 1;
     }
     GameState game;
@@ -1868,7 +2706,13 @@ static int dump_frame(const char *path)
     for (int i = 0; i < 45; ++i) {
         update_game(&game, &cam, 1.0 / 60.0);
     }
+    game.fireball_unlocked = 1;
+    game.fireball_ammo = 6;
+    select_weapon(&game, WEAPON_FIREBALL);
     player_fire(&game, &cam);
+    for (int i = 0; i < 18; ++i) {
+        update_projectiles(&game, &cam, 1.0 / 60.0);
+    }
     render_scene(&cam, &game);
     return write_ppm(path);
 }
@@ -1948,6 +2792,10 @@ int main(int argc, char **argv)
                 running = 0;
             } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
                 running = 0;
+            } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_1) {
+                select_weapon(&game, WEAPON_PISTOL);
+            } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_2) {
+                select_weapon(&game, WEAPON_FIREBALL);
             } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_SPACE) {
                 player_fire(&game, &cam);
             } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
