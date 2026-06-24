@@ -2,19 +2,23 @@
 
 Minimalny raycaster w C w stylu Wolfensteina. Cała scena jest renderowana softwareowo do bufora `uint32_t`, a SDL2 służy tylko do okna, inputu, audio i pokazania gotowej tekstury.
 
-Tekstury ścian, podłogi i sufitu są ładowane z `assets/textures.ppm`: atlas 4x2, osiem kafli po 64x64 px. Aktualny zestaw ma ciemny gotycki klimat krypty/dungeonu. Brak lub błędny atlas kończy program błędem.
+Tekstury ścian, podłogi i sufitu są ładowane z `assets/textures.ppm`: atlas 4x2, osiem kafli po 64x64 px. Aktualny zestaw miesza ciemny gotycki dungeon z kaflami mrocznego lasu: ziemia, mech, korzenie, kora i czarny baldachim drzew. Brak lub błędny atlas kończy program błędem.
 
-Potwory są ładowane z `assets/monsters.ppm`: atlas 4x3, trzy typy przeciwników po cztery klatki 64x64 px w kolejności front, prawy bok, tył, lewy bok. Magenta `#ff00ff` jest traktowana jako kolor przezroczysty.
+Potwory są ładowane z `assets/monsters.ppm`: atlas 4x4, cztery typy przeciwników po cztery klatki 64x64 px w kolejności front, prawy bok, tył, lewy bok. Pierwsze trzy typy to wcześniejsze potwory, a czwarty typ to zjawa. Magenta `#ff00ff` jest traktowana jako kolor przezroczysty.
 
-Dziesięć potworów patroluje poziom, większość z nich to szkielety. Przeciwnicy wykrywają gracza po line-of-sight, zapamiętują ostatnią pozycję, ścigają, trzymają dystans, strafują podczas ataku i strzelają ognistymi pociskami tylko w stanie ataku. Trzy typy przeciwników mają role: strzelec, szybki harasser i wolniejszy bruiser. Pociski są billboardami renderowanymi softwareowo, kolidują ze ścianami i dają czerwony flash na trafienie gracza.
+Drzewa lasu są ładowane z `assets/trees.ppm`: atlas 4x1, cztery warianty billboardów 64x64 px. Magenta `#ff00ff` jest przezroczysta. Brak atlasu kończy program błędem.
 
-Gracz ma pistolet hitscan oraz odblokowywany fireball z osobną amunicją. Fireball leci jako projectile, wybucha na ścianie albo przeciwniku i zadaje obrażenia obszarowe. Trafione potwory mają krótki pain flash, a śmierć robi proceduralny pomarańczowy pop.
+Relikwie kultu są ładowane z `assets/relics.ppm`: atlas 4x1, cztery sprity pickupów 32x32 px. Magenta `#ff00ff` jest przezroczysta. Brak atlasu kończy program błędem.
 
-Level jest generowany runtime: pokoje, korytarze, drzwi, sekrety, pochodnie, itemy i potwory powstają z seeda przy starcie runu. Są trzy tryby generatora: klasyczny układ pokoi i korytarzy, ciasny jednokaflowy labirynt z wejściem i dalekim wyjściem oraz boss level z labiryntem i komnatą bossa. Restart `R` tworzy następny seed w aktualnym trybie. `make dump` używa stałego seeda testowego, żeby render i walidacje były powtarzalne.
+Dziesięć potworów patroluje poziom. Przeciwnicy wykrywają gracza po line-of-sight i FOV, zapamiętują ostatnią pozycję, ścigają, trzymają dystans i reagują na pobliskiego potwora, który widzi gracza. Szkielet strzela ognistymi pociskami, a pozostałe typy, w tym zjawa, atakują głównie ciosami z bliska.
 
-Na mapie są itemy: apteczki, amunicja, rapid fire, damage boost, klucz i fireball ammo/unlock. Pickupy są rozłożone także w bocznych odnogach, żeby eksploracja dawała zasoby do walki. Są proste drzwi, zamknięte drzwi na klucz i sekretne ściany otwierane interakcją. W prawym górnym rogu jest minimapa z fog-of-war, odkrywająca teren wokół gracza, a `Tab` pokazuje większą automapę.
+Gracz startuje z nożem do krótkiego dystansu. Pistolet hitscan i fireball z osobną amunicją są odblokowywane pickupami. Fireball leci jako projectile, wybucha na ścianie albo przeciwniku i zadaje obrażenia obszarowe. Trafione potwory mają krótki pain flash, a śmierć robi proceduralny pomarańczowy pop.
 
-Na końcu poziomu czeka prosty mini-boss: większy, twardszy bruiser z mocniejszym pociskiem. Walka ma lekkie odpychanie przy kolizji z potworami, proceduralne dźwięki strzałów/pickupów/eksplozji oraz pauzę, restart i fullscreen.
+Gra startuje w mrocznym lesie i z nożem w ręku; pistolet i fireball trzeba znaleźć jako pickupy. Level jest generowany runtime: pokoje, korytarze, drzwi, sekrety, pochodnie albo ogniska, itemy i potwory powstają z seeda przy starcie runu. Są cztery tryby generatora: klasyczny układ pokoi i korytarzy, ciasny jednokaflowy labirynt z wejściem i dalekim wyjściem, boss level z labiryntem i komnatą bossa oraz mroczny las jako duży ogrodzony teren z drzewami, ogniskami, potworami, itemami i wejściami do dungeonów. Las ma cztery wejścia do dungeonów z relikwiami kultu oraz osobną bramę bossa. Wejście zapisuje aktualny stan lasu, a wyjście w dungeonie odtwarza ten sam las i kamerę przy wejściu. Restart `R` tworzy następny seed w aktualnym trybie. `make dump` używa stałego seeda testowego, żeby render i walidacje były powtarzalne.
+
+Na mapie są itemy: apteczki, amunicja, rapid fire, damage boost, klucz, fireball ammo/unlock i cztery relikwie kultu. Pickupy są rozłożone także w bocznych odnogach, żeby eksploracja dawała zasoby do walki. Są proste drzwi, zamknięte drzwi na klucz i sekretne ściany otwierane interakcją. W prawym górnym rogu jest minimapa z fog-of-war, odkrywająca teren wokół gracza, a `Tab` pokazuje większą automapę.
+
+Zebranie kompletu czterech relikwii odblokowuje bramę bossa w lesie. Boss jest dużo większy i twardszy od zwykłych przeciwników, ma mocniejszy atak z bliska i wolniejszy, bolesny pocisk dystansowy. Zwycięstwo następuje dopiero po zabiciu bossa. Walka ma lekkie odpychanie przy kolizji z potworami, sample dźwiękowe strzałów/pickupów/eksplozji oraz pauzę, restart i fullscreen.
 
 Render ma eksperymentalną mgłę wolumetryczną: dystansowy fog na ścianach, podłodze, suficie i sprite'ach oraz animowany, kłębiasty pass po buforze świata oparty o `z_buffer`. Mgła jest cięższa przy ziemi.
 
@@ -40,10 +44,11 @@ SDL2_PREFIX=/opt/homebrew/opt/sdl2 make
 - `W/S` albo strzałki góra/dół: przód/tył
 - `A/D` albo strzałki lewo/prawo: obrót
 - `Q/E`: strafing
-- `1/2`: pistolet/fireball po odblokowaniu
-- `3/4/5`: generator pokoi / ciasny labirynt / boss level
+- `1/2/3`: nóż / pistolet po podniesieniu / fireball po podniesieniu
+- `4/5/6/7`: generator pokoi / ciasny labirynt / boss level / mroczny las
 - `Spacja` albo lewy przycisk myszy: strzał z wybranej broni
-- `F`: interakcja z drzwiami i sekretami
+- `F`: interakcja z drzwiami, sekretami, wejściami i wyjściami dungeonów
+- `H`: pokazuje/ukrywa podpowiedź celu
 - `Tab`: pełna automapa
 - `P`: pauza
 - `R`: restart runu

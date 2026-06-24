@@ -1,0 +1,6 @@
+80 CC0 RPG SFX
+Author: rubberduck
+Source: https://opengameart.org/content/80-cc0-rpg-sfx
+License: CC0 1.0 Universal
+
+Only selected sounds are bundled here, converted from the original OGG files to 44.1 kHz mono signed 16-bit WAV for SDL_LoadWAV.
