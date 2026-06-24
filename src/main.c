@@ -21,6 +21,12 @@
 #define MAX_MONSTERS 10
 #define MAX_ITEMS 20
 #define MAX_TORCHES 26
+#define MAX_DECALS 32
+#define MAX_PARTICLES 64
+#define MAX_DOORS 4
+#define MAX_SECRETS 3
+#define MAX_LEVEL_ROOMS 10
+#define LEVEL_TEST_SEED 0x00C0FFEEu
 #define PLAYER_MAX_HEALTH 160
 #define START_AMMO 48
 #define START_FIREBALL_AMMO 0
@@ -72,6 +78,14 @@ enum {
     ITEM_RAPID = 2,
     ITEM_DAMAGE = 3,
     ITEM_FIREBALL = 4,
+    ITEM_KEY = 5,
+};
+
+enum {
+    GENERATOR_ROOMS = 0,
+    GENERATOR_TIGHT = 1,
+    GENERATOR_BOSS = 2,
+    GENERATOR_COUNT = 3,
 };
 
 typedef struct {
@@ -92,10 +106,13 @@ typedef struct {
     double facing_lock;
     int ai_state;
     Vec2 last_seen;
+    Vec2 patrol[4];
+    int patrol_count;
     double alert_timer;
     double strafe_timer;
     int strafe_dir;
     double pain_timer;
+    int is_boss;
 } Monster;
 
 typedef struct {
@@ -120,14 +137,54 @@ typedef struct {
 } Torch;
 
 typedef struct {
+    int x;
+    int y;
+    int locked;
+    int opening;
+    int open;
+    double open_amount;
+} Door;
+
+typedef struct {
+    int x;
+    int y;
+    int opening;
+    int open;
+    double open_amount;
+} Secret;
+
+typedef struct {
+    int active;
+    int type;
+    Vec2 pos;
+    double radius;
+    double life;
+} Decal;
+
+typedef struct {
+    int active;
+    Vec2 pos;
+    Vec2 vel;
+    double life;
+    double max_life;
+    double size;
+    uint32_t color;
+} Particle;
+
+typedef struct {
     Monster monsters[MAX_MONSTERS];
     int monster_count;
     Projectile projectiles[MAX_PROJECTILES];
     Item items[MAX_ITEMS];
+    Decal decals[MAX_DECALS];
+    Particle particles[MAX_PARTICLES];
+    Door doors[MAX_DOORS];
+    Secret secrets[MAX_SECRETS];
     double time;
     int player_health;
     int ammo;
     int fireball_ammo;
+    int keys;
     int selected_weapon;
     int fireball_unlocked;
     int kills;
@@ -140,6 +197,8 @@ typedef struct {
     double damage_timer;
     int victory;
     int game_over;
+    int show_automap;
+    int generator_mode;
     unsigned char discovered[MAP_H][MAP_W];
 } GameState;
 
@@ -149,66 +208,31 @@ typedef struct {
     double dist;
 } SpriteDraw;
 
+typedef struct {
+    int active;
+    double phase;
+    double freq;
+    double life;
+    double max_life;
+    double volume;
+} SoundVoice;
+
 static uint32_t framebuffer[SCREEN_W * SCREEN_H];
 static uint32_t textures[TEX_COUNT][TEX_SIZE * TEX_SIZE];
 static uint32_t monster_sprites[MONSTER_TYPES][SPRITE_FRAMES][SPRITE_SIZE * SPRITE_SIZE];
 static double z_buffer[SCREEN_W];
-
-static const int world_map[MAP_H][MAP_W] = {
-    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-    {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
-    {1,0,2,2,2,0,0,3,3,3,0,0,0,4,4,4,4,0,0,5,5,5,0,1},
-    {1,0,2,0,0,0,0,3,0,3,0,6,0,4,0,0,4,0,0,5,0,5,0,1},
-    {1,0,2,0,2,2,0,3,0,0,0,6,0,4,0,0,0,0,0,5,0,5,0,1},
-    {1,0,0,0,0,2,0,3,3,3,0,6,0,4,4,4,0,7,0,0,0,5,0,1},
-    {1,0,4,4,0,2,0,0,0,0,0,0,0,0,0,4,0,7,7,7,0,5,0,1},
-    {1,0,4,0,0,2,2,2,0,5,5,5,0,2,0,4,0,0,0,7,0,0,0,1},
-    {1,0,4,0,0,0,0,0,0,5,0,0,0,2,0,0,0,3,0,7,7,7,0,1},
-    {1,0,4,4,4,0,6,6,0,5,0,3,3,2,2,2,0,3,0,0,0,0,0,1},
-    {1,0,0,0,4,0,6,0,0,5,0,0,0,0,0,2,0,3,3,3,0,4,0,1},
-    {1,2,2,0,4,0,6,0,7,5,5,5,0,4,0,0,0,0,0,3,0,4,0,1},
-    {1,2,0,0,0,0,6,0,7,0,0,0,0,4,4,4,0,5,0,0,0,4,0,1},
-    {1,2,0,3,3,0,0,0,7,0,2,2,0,0,0,4,0,5,5,5,0,0,0,1},
-    {1,0,0,3,0,0,4,4,4,0,2,0,0,6,0,4,0,0,0,5,0,2,0,1},
-    {1,0,5,3,0,0,0,0,4,0,2,0,6,6,0,0,0,7,0,5,0,2,0,1},
-    {1,0,5,3,3,3,0,0,4,0,0,0,0,6,6,6,0,7,0,0,0,2,0,1},
-    {1,0,5,0,0,0,0,2,4,4,4,0,0,0,0,0,0,7,7,7,0,2,0,1},
-    {1,0,5,5,5,0,0,2,0,0,0,0,3,3,3,0,0,0,0,7,0,0,0,1},
-    {1,0,0,0,5,0,6,2,0,4,4,0,3,0,0,0,5,5,0,7,7,7,0,1},
-    {1,0,3,0,0,0,6,0,0,4,0,0,0,0,2,0,5,0,0,0,0,0,0,1},
-    {1,0,3,3,3,0,6,6,0,4,4,4,0,0,2,0,5,5,5,0,3,3,0,1},
-    {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
-    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-};
-
-static const Torch torches[MAX_TORCHES] = {
-    {{2.5, 1.08}},
-    {{8.5, 1.08}},
-    {{14.5, 1.08}},
-    {{21.5, 1.08}},
-    {{1.08, 5.5}},
-    {{22.92, 5.5}},
-    {{1.08, 10.5}},
-    {{22.92, 10.5}},
-    {{1.08, 16.5}},
-    {{22.92, 16.5}},
-    {{4.5, 22.92}},
-    {{10.5, 22.92}},
-    {{16.5, 22.92}},
-    {{21.5, 22.92}},
-    {{6.92, 3.5}},
-    {{10.92, 4.5}},
-    {{16.08, 5.5}},
-    {{8.5, 7.08}},
-    {{12.5, 7.08}},
-    {{18.08, 8.5}},
-    {{5.92, 10.5}},
-    {{13.5, 10.92}},
-    {{16.92, 12.5}},
-    {{9.08, 15.5}},
-    {{16.08, 16.5}},
-    {{11.5, 18.08}},
-};
+static double depth_buffer[SCREEN_W * SCREEN_H];
+static double glow_buffer[SCREEN_W * SCREEN_H];
+static double glow_blur_buffer[SCREEN_W * SCREEN_H];
+static double light_buffer[SCREEN_W * SCREEN_H];
+static GameState *active_game = NULL;
+static SoundVoice sound_voices[12];
+static SDL_AudioDeviceID audio_device = 0;
+static double audio_rate = 44100.0;
+static int level_map[MAP_H][MAP_W];
+static Torch torches[MAX_TORCHES];
+static uint32_t runtime_level_seed = LEVEL_TEST_SEED;
+static int runtime_level_mode = GENERATOR_ROOMS;
 
 static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -276,11 +300,138 @@ static uint32_t apply_fog(uint32_t color, double distance, double strength)
     return mix_color(color, fog_color(), fog_amount(distance) * clamp01(strength));
 }
 
+static double luminance(uint32_t color)
+{
+    double r = (double)((color >> 16) & 0xFFu);
+    double g = (double)((color >> 8) & 0xFFu);
+    double b = (double)(color & 0xFFu);
+    return (r * 0.2126 + g * 0.7152 + b * 0.0722) / 255.0;
+}
+
+static uint32_t add_color(uint32_t color, uint32_t add, double amount)
+{
+    int r = (int)((color >> 16) & 0xFFu) + (int)(((add >> 16) & 0xFFu) * amount);
+    int g = (int)((color >> 8) & 0xFFu) + (int)(((add >> 8) & 0xFFu) * amount);
+    int b = (int)(color & 0xFFu) + (int)((add & 0xFFu) * amount);
+    return rgb(clamp_u8(r), clamp_u8(g), clamp_u8(b));
+}
+
+static uint32_t contrast_color(uint32_t color, double contrast, double brightness)
+{
+    int cr = (int)((color >> 16) & 0xFFu);
+    int cg = (int)((color >> 8) & 0xFFu);
+    int cb = (int)(color & 0xFFu);
+    int r = (int)((cr - 128) * contrast + 128 + brightness);
+    int g = (int)((cg - 128) * contrast + 128 + brightness);
+    int b = (int)((cb - 128) * contrast + 128 + brightness);
+    return rgb(clamp_u8(r), clamp_u8(g), clamp_u8(b));
+}
+
 static void put_pixel(int x, int y, uint32_t color)
 {
     if (x >= 0 && x < SCREEN_W && y >= 0 && y < SCREEN_H) {
         framebuffer[y * SCREEN_W + x] = color;
     }
+}
+
+static void add_glow(int x, int y, double amount)
+{
+    if (x >= 0 && x < SCREEN_W && y >= 0 && y < SCREEN_H) {
+        int idx = y * SCREEN_W + x;
+        glow_buffer[idx] += amount;
+        if (glow_buffer[idx] > 1.0) {
+            glow_buffer[idx] = 1.0;
+        }
+    }
+}
+
+static void add_light(int x, int y, double amount)
+{
+    if (x >= 0 && x < SCREEN_W && y >= 0 && y < SCREEN_H) {
+        int idx = y * SCREEN_W + x;
+        light_buffer[idx] += amount;
+        if (light_buffer[idx] > 1.0) {
+            light_buffer[idx] = 1.0;
+        }
+    }
+}
+
+static void reset_render_buffers(void)
+{
+    for (int i = 0; i < SCREEN_W * SCREEN_H; ++i) {
+        depth_buffer[i] = 1e30;
+        glow_buffer[i] = 0.0;
+        glow_blur_buffer[i] = 0.0;
+        light_buffer[i] = 0.0;
+    }
+}
+
+static void audio_callback(void *userdata, uint8_t *stream, int len)
+{
+    (void)userdata;
+    int16_t *out = (int16_t *)stream;
+    int samples = len / (int)sizeof(int16_t);
+
+    for (int i = 0; i < samples; ++i) {
+        double sample = 0.0;
+        for (int v = 0; v < (int)(sizeof(sound_voices) / sizeof(sound_voices[0])); ++v) {
+            SoundVoice *voice = &sound_voices[v];
+            if (!voice->active) {
+                continue;
+            }
+            double t = voice->max_life > 0.0 ? voice->life / voice->max_life : 0.0;
+            double env = clamp01(t);
+            sample += sin(voice->phase) * voice->volume * env;
+            voice->phase += (M_PI * 2.0 * voice->freq) / audio_rate;
+            voice->life -= 1.0 / audio_rate;
+            if (voice->life <= 0.0) {
+                voice->active = 0;
+            }
+        }
+        out[i] = (int16_t)(clamp01(sample * 0.5 + 0.5) * 65534.0 - 32767.0);
+    }
+}
+
+static int init_audio(void)
+{
+    SDL_AudioSpec want;
+    SDL_AudioSpec have;
+    memset(&want, 0, sizeof(want));
+    want.freq = 44100;
+    want.format = AUDIO_S16SYS;
+    want.channels = 1;
+    want.samples = 512;
+    want.callback = audio_callback;
+
+    audio_device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+    if (!audio_device) {
+        fprintf(stderr, "SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
+        return 0;
+    }
+    audio_rate = (double)have.freq;
+    SDL_PauseAudioDevice(audio_device, 0);
+    return 1;
+}
+
+static void play_sound(double freq, double duration, double volume)
+{
+    if (!audio_device) {
+        return;
+    }
+    SDL_LockAudioDevice(audio_device);
+    for (int i = 0; i < (int)(sizeof(sound_voices) / sizeof(sound_voices[0])); ++i) {
+        SoundVoice *voice = &sound_voices[i];
+        if (!voice->active) {
+            voice->active = 1;
+            voice->phase = 0.0;
+            voice->freq = freq;
+            voice->life = duration;
+            voice->max_life = duration;
+            voice->volume = volume;
+            break;
+        }
+    }
+    SDL_UnlockAudioDevice(audio_device);
 }
 
 static void fill_rect(int x, int y, int w, int h, uint32_t color)
@@ -442,7 +593,21 @@ static int map_at(int x, int y)
     if (x < 0 || x >= MAP_W || y < 0 || y >= MAP_H) {
         return 1;
     }
-    return world_map[y][x];
+    if (active_game) {
+        for (int i = 0; i < MAX_DOORS; ++i) {
+            const Door *door = &active_game->doors[i];
+            if (door->x == x && door->y == y && !door->open) {
+                return door->locked ? 8 : 7;
+            }
+        }
+        for (int i = 0; i < MAX_SECRETS; ++i) {
+            const Secret *secret = &active_game->secrets[i];
+            if (secret->x == x && secret->y == y && !secret->open) {
+                return 6;
+            }
+        }
+    }
+    return level_map[y][x];
 }
 
 static double torch_light_at(double x, double y, double time)
@@ -469,6 +634,32 @@ static uint32_t apply_torch_light(uint32_t color, double base_light, double torc
 {
     uint32_t lit = shade(color, base_light + torch_light);
     return mix_color(lit, rgb(255, 132, 48), clamp01(torch_light * tint));
+}
+
+static double wall_bump_light(int tex_idx, int tex_x, int tex_y, double hit_x, double hit_y)
+{
+    int lx = (tex_x - 1) & (TEX_SIZE - 1);
+    int rx = (tex_x + 1) & (TEX_SIZE - 1);
+    int uy = (tex_y - 1) & (TEX_SIZE - 1);
+    int dy = (tex_y + 1) & (TEX_SIZE - 1);
+    double h_l = luminance(textures[tex_idx][tex_y * TEX_SIZE + lx]);
+    double h_r = luminance(textures[tex_idx][tex_y * TEX_SIZE + rx]);
+    double h_u = luminance(textures[tex_idx][uy * TEX_SIZE + tex_x]);
+    double h_d = luminance(textures[tex_idx][dy * TEX_SIZE + tex_x]);
+    double gx = h_r - h_l;
+    double gy = h_d - h_u;
+    double light_dir = 0.0;
+
+    for (int i = 0; i < MAX_TORCHES; ++i) {
+        double dx = torches[i].pos.x - hit_x;
+        double dyw = torches[i].pos.y - hit_y;
+        double dist2 = dx * dx + dyw * dyw;
+        if (dist2 < 12.0) {
+            light_dir += (gx * dx + gy * dyw) / (1.0 + dist2);
+        }
+    }
+
+    return clamp01(0.5 + light_dir * 2.8);
 }
 
 static void render_floor_ceiling(const Camera *cam, const GameState *game)
@@ -511,6 +702,10 @@ static void render_floor_ceiling(const Camera *cam, const GameState *game)
             uint32_t lit_ceil = apply_torch_light(ceil_color, light * 0.18, torch_light * 0.26, 0.10);
             framebuffer[y * SCREEN_W + x] = apply_fog(lit_floor, row_distance, 0.86);
             framebuffer[(SCREEN_H - y - 1) * SCREEN_W + x] = apply_fog(lit_ceil, row_distance, 0.76);
+            depth_buffer[y * SCREEN_W + x] = row_distance;
+            depth_buffer[(SCREEN_H - y - 1) * SCREEN_W + x] = row_distance;
+            add_light(x, y, torch_light * 0.18);
+            add_light(x, SCREEN_H - y - 1, torch_light * 0.08);
 
             floor_x += floor_step_x;
             floor_y += floor_step_y;
@@ -571,14 +766,16 @@ static void render_monster(const Camera *cam, const Monster *monster)
     int sprite_screen_x;
     int sprite_h;
     double depth;
-    if (!project_sprite(cam, monster->pos, 1.0, &sprite_screen_x, &sprite_h, &depth)) {
+    double monster_scale = monster->is_boss ? 1.35 : 1.0;
+    if (!project_sprite(cam, monster->pos, monster_scale, &sprite_screen_x, &sprite_h, &depth)) {
         return;
     }
 
     int sprite_w = sprite_h;
 
-    int draw_start_y = -sprite_h / 2 + SCREEN_H / 2;
-    int draw_end_y = sprite_h / 2 + SCREEN_H / 2;
+    int bob = (int)(sin(monster->pos.x * 2.3 + monster->pos.y * 1.7) * (monster->is_boss ? 3.0 : 1.5));
+    int draw_start_y = -sprite_h / 2 + SCREEN_H / 2 + bob;
+    int draw_end_y = sprite_h / 2 + SCREEN_H / 2 + bob;
     int draw_start_x = -sprite_w / 2 + sprite_screen_x;
     int draw_end_x = sprite_w / 2 + sprite_screen_x;
 
@@ -588,7 +785,7 @@ static void render_monster(const Camera *cam, const Monster *monster)
     if (draw_end_x >= SCREEN_W) draw_end_x = SCREEN_W - 1;
 
     int frame = monster_frame_for_camera(cam, monster);
-    double light = 1.0 / (1.0 + depth * 0.055);
+    double light = (monster->is_boss ? 1.15 : 1.0) / (1.0 + depth * 0.055);
 
     for (int stripe = draw_start_x; stripe <= draw_end_x; ++stripe) {
         if (depth >= z_buffer[stripe]) {
@@ -614,8 +811,10 @@ static void render_monster(const Camera *cam, const Monster *monster)
                 uint32_t lit = shade(color, light);
                 if (monster->pain_timer > 0.0) {
                     lit = mix_color(lit, rgb(255, 210, 118), clamp01(monster->pain_timer / 0.18));
+                    add_glow(stripe, y, monster->pain_timer * 0.35);
                 }
                 framebuffer[y * SCREEN_W + stripe] = apply_fog(lit, depth, 0.82);
+                depth_buffer[y * SCREEN_W + stripe] = depth;
             }
         }
     }
@@ -707,6 +906,11 @@ static void render_projectile(const Camera *cam, const Projectile *projectile)
             if (color != 0) {
                 double fog_strength = projectile->type == PROJECTILE_EXPLOSION ? 0.12 : 0.28;
                 framebuffer[y * SCREEN_W + stripe] = apply_fog(shade(color, light), depth, fog_strength);
+                depth_buffer[y * SCREEN_W + stripe] = depth;
+                if (projectile->type == PROJECTILE_PLAYER_FIREBALL || projectile->type == PROJECTILE_EXPLOSION) {
+                    add_glow(stripe, y, projectile->type == PROJECTILE_EXPLOSION ? 0.85 : 0.55);
+                    add_light(stripe, y, projectile->type == PROJECTILE_EXPLOSION ? 0.35 : 0.22);
+                }
             }
         }
     }
@@ -744,11 +948,22 @@ static uint32_t item_texel(int type, int tex_x, int tex_y)
             return rgb(255, 244, 160);
         }
         return border ? rgb(86, 20, 104) : rgb(186, 64, 230);
-    default:
+    case ITEM_FIREBALL:
         if (dist < PROJECTILE_SIZE * 0.18 || ((tex_x + tex_y) & 7) == 0) {
             return rgb(255, 228, 118);
         }
         return border ? rgb(88, 28, 16) : rgb(230, 82, 24);
+    default:
+        if (tex_y > 12 && tex_y < 18 && tex_x > 8 && tex_x < 24) {
+            return rgb(238, 202, 86);
+        }
+        if (tex_x > 18 && tex_x < 22 && tex_y > 16 && tex_y < 27) {
+            return rgb(180, 128, 42);
+        }
+        if (dist < PROJECTILE_SIZE * 0.18) {
+            return rgb(255, 232, 128);
+        }
+        return border ? rgb(88, 64, 24) : rgb(210, 164, 58);
     }
 }
 
@@ -795,6 +1010,10 @@ static void render_item(const Camera *cam, const Item *item)
             uint32_t color = item_texel(item->type, tex_x, tex_y);
             if (color != 0) {
                 framebuffer[y * SCREEN_W + stripe] = apply_fog(shade(color, light), depth, 0.72);
+                depth_buffer[y * SCREEN_W + stripe] = depth;
+                if (item->type == ITEM_FIREBALL || item->type == ITEM_RAPID || item->type == ITEM_DAMAGE) {
+                    add_glow(stripe, y, item->type == ITEM_FIREBALL ? 0.22 : 0.12);
+                }
             }
         }
     }
@@ -882,11 +1101,15 @@ static void render_torch(const Camera *cam, const Torch *torch, int index, doubl
                 double amount = glow * 0.46 / (1.0 + depth * 0.035);
                 uint32_t current = framebuffer[y * SCREEN_W + stripe];
                 framebuffer[y * SCREEN_W + stripe] = mix_color(current, rgb(255, 146, 42), clamp01(amount));
+                add_glow(stripe, y, amount * 0.75);
+                add_light(stripe, y, amount * 0.28);
             }
 
             uint32_t color = torch_texel(tex_x, tex_y, time, index);
             if (color != 0) {
                 framebuffer[y * SCREEN_W + stripe] = apply_fog(shade(color, light), depth, 0.20);
+                depth_buffer[y * SCREEN_W + stripe] = depth;
+                add_glow(stripe, y, 0.42);
             }
         }
     }
@@ -894,7 +1117,7 @@ static void render_torch(const Camera *cam, const Torch *torch, int index, doubl
 
 static void render_world_sprites(const Camera *cam, const GameState *game)
 {
-    SpriteDraw draws[MAX_MONSTERS + MAX_PROJECTILES + MAX_ITEMS + MAX_TORCHES];
+    SpriteDraw draws[MAX_MONSTERS + MAX_PROJECTILES + MAX_ITEMS + MAX_TORCHES + MAX_PARTICLES];
     int count = 0;
 
     for (int i = 0; i < game->monster_count; ++i) {
@@ -933,6 +1156,16 @@ static void render_world_sprites(const Camera *cam, const GameState *game)
         draws[count++] = (SpriteDraw){3, i, dx * dx + dy * dy};
     }
 
+    for (int i = 0; i < MAX_PARTICLES; ++i) {
+        const Particle *particle = &game->particles[i];
+        if (!particle->active) {
+            continue;
+        }
+        double dx = particle->pos.x - cam->pos.x;
+        double dy = particle->pos.y - cam->pos.y;
+        draws[count++] = (SpriteDraw){4, i, dx * dx + dy * dy};
+    }
+
     for (int i = 0; i < count - 1; ++i) {
         for (int j = i + 1; j < count; ++j) {
             if (draws[i].dist < draws[j].dist) {
@@ -951,8 +1184,45 @@ static void render_world_sprites(const Camera *cam, const GameState *game)
             render_item(cam, &game->items[draw.index]);
         } else if (draw.kind == 2) {
             render_projectile(cam, &game->projectiles[draw.index]);
-        } else {
+        } else if (draw.kind == 3) {
             render_torch(cam, &torches[draw.index], draw.index, game->time);
+        } else {
+            const Particle *particle = &game->particles[draw.index];
+            int sprite_screen_x;
+            int sprite_h;
+            double depth;
+            if (!project_sprite(cam, particle->pos, particle->size, &sprite_screen_x, &sprite_h, &depth)) {
+                continue;
+            }
+            int sprite_w = sprite_h;
+            int start_x = sprite_screen_x - sprite_w / 2;
+            int end_x = sprite_screen_x + sprite_w / 2;
+            int start_y = SCREEN_H / 2 - sprite_h / 2;
+            int end_y = SCREEN_H / 2 + sprite_h / 2;
+            if (start_x < 0) start_x = 0;
+            if (end_x >= SCREEN_W) end_x = SCREEN_W - 1;
+            if (start_y < 0) start_y = 0;
+            if (end_y >= SCREEN_H - 14) end_y = SCREEN_H - 15;
+
+            double life_t = particle->max_life > 0.0 ? particle->life / particle->max_life : 0.0;
+            for (int y = start_y; y <= end_y; ++y) {
+                double ny = (y - (SCREEN_H / 2.0)) / (sprite_h * 0.5);
+                for (int x = start_x; x <= end_x; ++x) {
+                    if (depth >= z_buffer[x] + 0.18) {
+                        continue;
+                    }
+                    double nx = (x - sprite_screen_x) / (sprite_w * 0.5);
+                    double d = nx * nx + ny * ny;
+                    if (d > 1.0) {
+                        continue;
+                    }
+                    double soft = clamp01((z_buffer[x] - depth + 0.22) / 0.50);
+                    double a = (1.0 - d) * life_t * soft * 0.42;
+                    int idx = y * SCREEN_W + x;
+                    framebuffer[idx] = mix_color(framebuffer[idx], particle->color, a);
+                    add_glow(x, y, a * 0.16);
+                }
+            }
         }
     }
 }
@@ -1017,6 +1287,77 @@ static void render_volumetric_fog(const Camera *cam, const GameState *game)
                     framebuffer[y * SCREEN_W + x] = mix_color(color, rgb(166, 78, 32), clamp01(warm_amount));
                 }
             }
+        }
+    }
+}
+
+static void render_light_buffer(void)
+{
+    for (int y = 0; y < SCREEN_H - 14; ++y) {
+        for (int x = 0; x < SCREEN_W; ++x) {
+            int idx = y * SCREEN_W + x;
+            double light = light_buffer[idx];
+            if (light > 0.002) {
+                framebuffer[idx] = mix_color(framebuffer[idx], rgb(255, 134, 48), clamp01(light * 0.18));
+            }
+        }
+    }
+}
+
+static void render_bloom(void)
+{
+    for (int y = 1; y < SCREEN_H - 15; ++y) {
+        for (int x = 1; x < SCREEN_W - 1; ++x) {
+            int idx = y * SCREEN_W + x;
+            double s =
+                glow_buffer[idx] * 0.34 +
+                glow_buffer[idx - 1] * 0.12 +
+                glow_buffer[idx + 1] * 0.12 +
+                glow_buffer[idx - SCREEN_W] * 0.12 +
+                glow_buffer[idx + SCREEN_W] * 0.12 +
+                glow_buffer[idx - SCREEN_W - 1] * 0.045 +
+                glow_buffer[idx - SCREEN_W + 1] * 0.045 +
+                glow_buffer[idx + SCREEN_W - 1] * 0.045 +
+                glow_buffer[idx + SCREEN_W + 1] * 0.045;
+            glow_blur_buffer[idx] = s;
+        }
+    }
+
+    for (int y = 2; y < SCREEN_H - 16; ++y) {
+        for (int x = 2; x < SCREEN_W - 2; ++x) {
+            int idx = y * SCREEN_W + x;
+            double s =
+                glow_blur_buffer[idx] * 0.36 +
+                glow_blur_buffer[idx - 2] * 0.08 +
+                glow_blur_buffer[idx + 2] * 0.08 +
+                glow_blur_buffer[idx - SCREEN_W * 2] * 0.08 +
+                glow_blur_buffer[idx + SCREEN_W * 2] * 0.08 +
+                glow_blur_buffer[idx - 1] * 0.08 +
+                glow_blur_buffer[idx + 1] * 0.08 +
+                glow_blur_buffer[idx - SCREEN_W] * 0.08 +
+                glow_blur_buffer[idx + SCREEN_W] * 0.08;
+            if (s > 0.004) {
+                framebuffer[idx] = add_color(framebuffer[idx], rgb(255, 122, 40), s * 0.55);
+            }
+        }
+    }
+}
+
+static void render_color_grade(void)
+{
+    for (int y = 0; y < SCREEN_H - 14; ++y) {
+        double ny = (y - SCREEN_H * 0.5) / (SCREEN_H * 0.5);
+        for (int x = 0; x < SCREEN_W; ++x) {
+            int idx = y * SCREEN_W + x;
+            double nx = (x - SCREEN_W * 0.5) / (SCREEN_W * 0.5);
+            double vignette = clamp01((nx * nx + ny * ny) * 0.34);
+            uint32_t c = framebuffer[idx];
+            c = contrast_color(c, 1.12, -5.0);
+            c = mix_color(c, rgb(20, 28, 30), vignette * 0.45);
+            if (light_buffer[idx] > 0.03 || glow_buffer[idx] > 0.03) {
+                c = mix_color(c, rgb(255, 132, 48), clamp01((light_buffer[idx] + glow_buffer[idx]) * 0.05));
+            }
+            framebuffer[idx] = c;
         }
     }
 }
@@ -1151,6 +1492,10 @@ static void render_hud(const GameState *game)
     for (int i = 0; i < fire_pips; ++i) {
         fill_rect(222 + i * 4, SCREEN_H - 10, 2, 6, rgb(232, 92, 28));
     }
+    for (int i = 0; i < GENERATOR_COUNT; ++i) {
+        uint32_t c = i == game->generator_mode ? rgb(92, 190, 160) : rgb(42, 48, 46);
+        fill_rect(248 + i * 7, SCREEN_H - 11, 5, 8, c);
+    }
 
     for (int i = 0; i < game->monster_count; ++i) {
         uint32_t c = i < game->kills ? rgb(120, 28, 24) : rgb(52, 132, 52);
@@ -1202,10 +1547,11 @@ static void render_minimap(const Camera *cam, const GameState *game)
         int ix = (int)item->pos.x;
         int iy = (int)item->pos.y;
         if (item->active && ix >= 0 && ix < MAP_W && iy >= 0 && iy < MAP_H && game->discovered[iy][ix]) {
-            uint32_t c = item->type == 0 ? rgb(210, 42, 48) :
-                         item->type == 1 ? rgb(220, 170, 64) :
-                         item->type == 2 ? rgb(54, 174, 230) :
-                         item->type == 4 ? rgb(230, 88, 28) : rgb(190, 70, 230);
+            uint32_t c = item->type == ITEM_HEALTH ? rgb(210, 42, 48) :
+                         item->type == ITEM_AMMO ? rgb(220, 170, 64) :
+                         item->type == ITEM_RAPID ? rgb(54, 174, 230) :
+                         item->type == ITEM_FIREBALL ? rgb(230, 88, 28) :
+                         item->type == ITEM_KEY ? rgb(238, 202, 86) : rgb(190, 70, 230);
             fill_rect(ox + ix * cell + 1, oy + iy * cell + 1, 2, 2, c);
         }
     }
@@ -1224,8 +1570,154 @@ static void render_minimap(const Camera *cam, const GameState *game)
     fill_rect(ox + px * cell, oy + py * cell, cell, cell, rgb(236, 220, 72));
 }
 
+static void render_full_automap(const Camera *cam, const GameState *game)
+{
+    const int cell = 7;
+    const int ox = (SCREEN_W - MAP_W * cell) / 2;
+    const int oy = (SCREEN_H - 14 - MAP_H * cell) / 2;
+
+    fill_rect(0, 0, SCREEN_W, SCREEN_H - 14, rgb(4, 5, 6));
+    fill_rect(ox - 4, oy - 4, MAP_W * cell + 8, MAP_H * cell + 8, rgb(15, 13, 12));
+
+    for (int y = 0; y < MAP_H; ++y) {
+        for (int x = 0; x < MAP_W; ++x) {
+            uint32_t c = rgb(7, 8, 9);
+            if (game->discovered[y][x]) {
+                int wall = map_at(x, y);
+                c = wall ? rgb(88, 70, 58) : rgb(28, 28, 25);
+                if (wall == 7) c = rgb(126, 82, 40);
+                if (wall == 8) c = rgb(132, 102, 34);
+                if (wall == 6) c = rgb(66, 50, 72);
+            }
+            fill_rect(ox + x * cell, oy + y * cell, cell - 1, cell - 1, c);
+        }
+    }
+
+    for (int i = 0; i < MAX_ITEMS; ++i) {
+        const Item *item = &game->items[i];
+        int ix = (int)item->pos.x;
+        int iy = (int)item->pos.y;
+        if (item->active && ix >= 0 && ix < MAP_W && iy >= 0 && iy < MAP_H && game->discovered[iy][ix]) {
+            uint32_t c = item->type == ITEM_KEY ? rgb(242, 210, 74) :
+                         item->type == ITEM_HEALTH ? rgb(218, 42, 54) :
+                         item->type == ITEM_FIREBALL ? rgb(238, 94, 30) :
+                         item->type == ITEM_RAPID ? rgb(54, 180, 230) :
+                         item->type == ITEM_DAMAGE ? rgb(190, 70, 230) : rgb(220, 170, 64);
+            fill_rect(ox + ix * cell + 2, oy + iy * cell + 2, 3, 3, c);
+        }
+    }
+
+    for (int i = 0; i < game->monster_count; ++i) {
+        const Monster *monster = &game->monsters[i];
+        int mx = (int)monster->pos.x;
+        int my = (int)monster->pos.y;
+        if (monster->active && mx >= 0 && mx < MAP_W && my >= 0 && my < MAP_H && game->discovered[my][mx]) {
+            fill_rect(ox + mx * cell + 1, oy + my * cell + 1, cell - 3, cell - 3,
+                      monster->is_boss ? rgb(210, 42, 32) : rgb(150, 32, 28));
+        }
+    }
+
+    int px = (int)cam->pos.x;
+    int py = (int)cam->pos.y;
+    fill_rect(ox + px * cell + 1, oy + py * cell + 1, cell - 2, cell - 2, rgb(236, 220, 72));
+    put_pixel(ox + px * cell + cell / 2 + (int)(cam->dir.x * 3.0),
+              oy + py * cell + cell / 2 + (int)(cam->dir.y * 3.0),
+              rgb(255, 248, 160));
+}
+
+static void render_pause_overlay(void)
+{
+    fill_rect(SCREEN_W / 2 - 42, 52, 84, 34, rgb(10, 10, 12));
+    fill_rect(SCREEN_W / 2 - 24, 60, 12, 18, rgb(190, 166, 100));
+    fill_rect(SCREEN_W / 2 + 12, 60, 12, 18, rgb(190, 166, 100));
+    fill_rect(SCREEN_W / 2 - 32, 90, 64, 4, rgb(84, 72, 50));
+}
+
+static void render_screen_ellipse(int cx, int cy, int rx, int ry, double depth, uint32_t color, double strength)
+{
+    if (rx < 1 || ry < 1) {
+        return;
+    }
+
+    int start_x = cx - rx;
+    int end_x = cx + rx;
+    int start_y = cy - ry;
+    int end_y = cy + ry;
+    if (start_x < 0) start_x = 0;
+    if (end_x >= SCREEN_W) end_x = SCREEN_W - 1;
+    if (start_y < 0) start_y = 0;
+    if (end_y >= SCREEN_H - 14) end_y = SCREEN_H - 15;
+
+    for (int y = start_y; y <= end_y; ++y) {
+        double ny = (y - cy) / (double)ry;
+        for (int x = start_x; x <= end_x; ++x) {
+            if (depth >= z_buffer[x] + 0.10) {
+                continue;
+            }
+            double nx = (x - cx) / (double)rx;
+            double d = nx * nx + ny * ny;
+            if (d > 1.0) {
+                continue;
+            }
+            double a = (1.0 - d) * strength;
+            int idx = y * SCREEN_W + x;
+            framebuffer[idx] = mix_color(framebuffer[idx], color, clamp01(a));
+        }
+    }
+}
+
+static void render_dynamic_shadows(const Camera *cam, const GameState *game)
+{
+    for (int i = 0; i < game->monster_count; ++i) {
+        const Monster *monster = &game->monsters[i];
+        if (!monster->active) {
+            continue;
+        }
+        int sx;
+        int sh;
+        double depth;
+        if (project_sprite(cam, monster->pos, 1.0, &sx, &sh, &depth)) {
+            int scale = monster->is_boss ? 2 : 1;
+            render_screen_ellipse(sx, SCREEN_H / 2 + sh / 2 - 3, sh * scale / 3, sh * scale / 14 + 1, depth, rgb(0, 0, 0), monster->is_boss ? 0.46 : 0.34);
+        }
+    }
+
+    for (int i = 0; i < MAX_ITEMS; ++i) {
+        const Item *item = &game->items[i];
+        if (!item->active) {
+            continue;
+        }
+        int sx;
+        int sh;
+        double depth;
+        if (project_sprite(cam, item->pos, 0.42, &sx, &sh, &depth)) {
+            render_screen_ellipse(sx, SCREEN_H / 2 + sh / 2 - 1, sh / 4, sh / 14 + 1, depth, rgb(0, 0, 0), 0.22);
+        }
+    }
+}
+
+static void render_decals(const Camera *cam, const GameState *game)
+{
+    for (int i = 0; i < MAX_DECALS; ++i) {
+        const Decal *decal = &game->decals[i];
+        if (!decal->active) {
+            continue;
+        }
+        int sx;
+        int sh;
+        double depth;
+        if (!project_sprite(cam, decal->pos, decal->radius, &sx, &sh, &depth)) {
+            continue;
+        }
+        double fade = clamp01(decal->life / 30.0);
+        render_screen_ellipse(sx, SCREEN_H / 2 + sh / 2, sh / 2, sh / 8 + 1, depth, rgb(38, 14, 8), 0.42 * fade);
+        render_screen_ellipse(sx, SCREEN_H / 2 + sh / 2, sh / 4, sh / 16 + 1, depth, rgb(120, 42, 18), 0.18 * fade);
+    }
+}
+
 static void render_scene(const Camera *cam, const GameState *game)
 {
+    reset_render_buffers();
     render_floor_ceiling(cam, game);
 
     for (int x = 0; x < SCREEN_W; ++x) {
@@ -1316,19 +1808,31 @@ static void render_scene(const Camera *cam, const GameState *game)
             int tex_y = ((int)tex_pos) & (TEX_SIZE - 1);
             tex_pos += step;
             uint32_t color = textures[tex_idx][tex_y * TEX_SIZE + tex_x];
-            uint32_t lit = apply_torch_light(color, light, torch_light, 0.30);
+            double bump = wall_bump_light(tex_idx, tex_x, tex_y, hit_x, hit_y);
+            uint32_t lit = apply_torch_light(color, light * (0.84 + bump * 0.22), torch_light * (0.72 + bump * 0.50), 0.30);
             framebuffer[y * SCREEN_W + x] = apply_fog(lit, perp_wall_dist, 1.0);
+            depth_buffer[y * SCREEN_W + x] = perp_wall_dist;
+            add_light(x, y, torch_light * 0.10);
         }
     }
 
+    render_decals(cam, game);
+    render_dynamic_shadows(cam, game);
     render_world_sprites(cam, game);
     render_volumetric_fog(cam, game);
+    render_light_buffer();
+    render_bloom();
+    render_color_grade();
     render_hit_flash(game);
     render_crosshair();
     render_shot_trace(game);
     render_weapon(game);
     render_hud(game);
     render_minimap(cam, game);
+    if (game->show_automap) {
+        render_full_automap(cam, game);
+        render_hud(game);
+    }
 }
 
 static double vec_len(Vec2 v)
@@ -1498,73 +2002,442 @@ static void reveal_fog(GameState *game, const Camera *cam)
     }
 }
 
-static void init_game(GameState *game)
+typedef struct {
+    uint32_t state;
+} LevelRng;
+
+typedef struct {
+    int x;
+    int y;
+    int w;
+    int h;
+} LevelRoom;
+
+static uint32_t rng_next(LevelRng *rng)
+{
+    rng->state = rng->state * 1664525u + 1013904223u;
+    return rng->state;
+}
+
+static int rng_range(LevelRng *rng, int min, int max)
+{
+    return min + (int)(rng_next(rng) % (uint32_t)(max - min + 1));
+}
+
+static int level_wall_tex(int x, int y, uint32_t seed)
+{
+    uint32_t v = (uint32_t)(x * 73856093u) ^ (uint32_t)(y * 19349663u) ^ seed;
+    return 1 + (int)(v % 7u);
+}
+
+static void level_fill_walls(uint32_t seed)
+{
+    for (int y = 0; y < MAP_H; ++y) {
+        for (int x = 0; x < MAP_W; ++x) {
+            level_map[y][x] = level_wall_tex(x, y, seed);
+        }
+    }
+}
+
+static void carve_tile(int x, int y)
+{
+    if (x > 0 && x < MAP_W - 1 && y > 0 && y < MAP_H - 1) {
+        level_map[y][x] = 0;
+    }
+}
+
+static void carve_room(LevelRoom room)
+{
+    for (int y = room.y; y < room.y + room.h; ++y) {
+        for (int x = room.x; x < room.x + room.w; ++x) {
+            carve_tile(x, y);
+        }
+    }
+}
+
+static void carve_h_corridor(int x0, int x1, int y)
+{
+    if (x0 > x1) {
+        int t = x0;
+        x0 = x1;
+        x1 = t;
+    }
+    for (int x = x0; x <= x1; ++x) {
+        carve_tile(x, y);
+    }
+}
+
+static void carve_v_corridor(int x, int y0, int y1)
+{
+    if (y0 > y1) {
+        int t = y0;
+        y0 = y1;
+        y1 = t;
+    }
+    for (int y = y0; y <= y1; ++y) {
+        carve_tile(x, y);
+    }
+}
+
+static Vec2 room_center(LevelRoom room)
+{
+    return (Vec2){room.x + room.w * 0.5, room.y + room.h * 0.5};
+}
+
+static double start_dist2(int x, int y)
+{
+    double dx = x + 0.5 - 2.5;
+    double dy = y + 0.5 - 22.5;
+    return dx * dx + dy * dy;
+}
+
+static int generated_floor(int x, int y)
+{
+    return x > 0 && x < MAP_W - 1 && y > 0 && y < MAP_H - 1 && level_map[y][x] == 0;
+}
+
+static int reserved_dynamic_tile(const GameState *game, int x, int y)
+{
+    for (int i = 0; i < MAX_DOORS; ++i) {
+        if (game->doors[i].x == x && game->doors[i].y == y) {
+            return 1;
+        }
+    }
+    for (int i = 0; i < MAX_SECRETS; ++i) {
+        if (game->secrets[i].x == x && game->secrets[i].y == y) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int occupied_spawn_tile(const GameState *game, int x, int y)
+{
+    if (reserved_dynamic_tile(game, x, y)) {
+        return 1;
+    }
+    for (int i = 0; i < MAX_ITEMS; ++i) {
+        if (game->items[i].active && (int)game->items[i].pos.x == x && (int)game->items[i].pos.y == y) {
+            return 1;
+        }
+    }
+    for (int i = 0; i < game->monster_count; ++i) {
+        if (game->monsters[i].active && (int)game->monsters[i].pos.x == x && (int)game->monsters[i].pos.y == y) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static Vec2 pick_floor_spot(LevelRng *rng, const GameState *game, double min_dist2)
+{
+    Vec2 best = {2.5, 22.5};
+    double best_dist = -1.0;
+    for (int attempt = 0; attempt < 220; ++attempt) {
+        int x = rng_range(rng, 1, MAP_W - 2);
+        int y = rng_range(rng, 1, MAP_H - 2);
+        double d = start_dist2(x, y);
+        if (generated_floor(x, y) && !occupied_spawn_tile(game, x, y) && d >= min_dist2) {
+            return (Vec2){x + 0.5, y + 0.5};
+        }
+        if (generated_floor(x, y) && !occupied_spawn_tile(game, x, y) && d > best_dist) {
+            best_dist = d;
+            best = (Vec2){x + 0.5, y + 0.5};
+        }
+    }
+    return best;
+}
+
+static Vec2 pick_floor_spot_in_rect(LevelRng *rng, const GameState *game, int rx, int ry, int rw, int rh)
+{
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        int x = rng_range(rng, rx, rx + rw - 1);
+        int y = rng_range(rng, ry, ry + rh - 1);
+        if (generated_floor(x, y) && !occupied_spawn_tile(game, x, y)) {
+            return (Vec2){x + 0.5, y + 0.5};
+        }
+    }
+    return (Vec2){rx + rw * 0.5, ry + rh * 0.5};
+}
+
+static void place_generated_doors(GameState *game, LevelRng *rng)
+{
+    int count = 0;
+    for (int pass = 0; pass < 2 && count < MAX_DOORS; ++pass) {
+        for (int attempt = 0; attempt < 420 && count < MAX_DOORS; ++attempt) {
+            int x = rng_range(rng, 2, MAP_W - 3);
+            int y = rng_range(rng, 2, MAP_H - 3);
+            if (!generated_floor(x, y) || reserved_dynamic_tile(game, x, y) || start_dist2(x, y) < 20.0) {
+                continue;
+            }
+
+            int vertical_gap = level_map[y][x - 1] > 0 && level_map[y][x + 1] > 0 &&
+                               generated_floor(x, y - 1) && generated_floor(x, y + 1);
+            int horizontal_gap = level_map[y - 1][x] > 0 && level_map[y + 1][x] > 0 &&
+                                 generated_floor(x - 1, y) && generated_floor(x + 1, y);
+            if (!vertical_gap && !horizontal_gap) {
+                continue;
+            }
+
+            int locked = count < 2;
+            game->doors[count++] = (Door){x, y, locked, 0, 0, 0.0};
+        }
+    }
+}
+
+static void place_generated_secrets(GameState *game, LevelRng *rng)
+{
+    int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    int count = 0;
+
+    for (int attempt = 0; attempt < 700 && count < MAX_SECRETS; ++attempt) {
+        int x = rng_range(rng, 2, MAP_W - 3);
+        int y = rng_range(rng, 2, MAP_H - 3);
+        if (level_map[y][x] == 0 || reserved_dynamic_tile(game, x, y) || start_dist2(x, y) < 18.0) {
+            continue;
+        }
+
+        int dir_i = rng_range(rng, 0, 3);
+        for (int r = 0; r < 4; ++r) {
+            int *dir = dirs[(dir_i + r) & 3];
+            int ox = x + dir[0];
+            int oy = y + dir[1];
+            int hx = x - dir[0];
+            int hy = y - dir[1];
+            if (!generated_floor(ox, oy) || hx <= 1 || hx >= MAP_W - 2 || hy <= 1 || hy >= MAP_H - 2) {
+                continue;
+            }
+            if (level_map[hy][hx] == 0) {
+                continue;
+            }
+
+            carve_tile(hx, hy);
+            carve_tile(hx - dir[1], hy - dir[0]);
+            carve_tile(hx + dir[1], hy + dir[0]);
+            level_map[y][x] = level_wall_tex(x, y, rng->state);
+            game->secrets[count++] = (Secret){x, y, 0, 0, 0.0};
+            break;
+        }
+    }
+}
+
+static void place_generated_torches(const GameState *game)
+{
+    int count = 0;
+    memset(torches, 0, sizeof(torches));
+
+    for (int y = 1; y < MAP_H - 1 && count < MAX_TORCHES; ++y) {
+        for (int x = 1; x < MAP_W - 1 && count < MAX_TORCHES; ++x) {
+            if (!generated_floor(x, y) || reserved_dynamic_tile(game, x, y) || ((x * 11 + y * 7) % 5) != 0) {
+                continue;
+            }
+            if (level_map[y][x - 1] > 0) {
+                torches[count++].pos = (Vec2){x + 0.08, y + 0.5};
+            } else if (level_map[y][x + 1] > 0) {
+                torches[count++].pos = (Vec2){x + 0.92, y + 0.5};
+            } else if (level_map[y - 1][x] > 0) {
+                torches[count++].pos = (Vec2){x + 0.5, y + 0.08};
+            } else if (level_map[y + 1][x] > 0) {
+                torches[count++].pos = (Vec2){x + 0.5, y + 0.92};
+            }
+        }
+    }
+
+    for (int y = 1; y < MAP_H - 1 && count < MAX_TORCHES; ++y) {
+        for (int x = 1; x < MAP_W - 1 && count < MAX_TORCHES; ++x) {
+            if (generated_floor(x, y) && !reserved_dynamic_tile(game, x, y) && level_map[y][x - 1] > 0) {
+                torches[count++].pos = (Vec2){x + 0.08, y + 0.5};
+            }
+        }
+    }
+}
+
+static void place_generated_items(GameState *game, LevelRng *rng)
+{
+    static const int item_types[MAX_ITEMS] = {
+        ITEM_KEY, ITEM_HEALTH, ITEM_RAPID, ITEM_FIREBALL, ITEM_AMMO,
+        ITEM_HEALTH, ITEM_RAPID, ITEM_DAMAGE, ITEM_AMMO, ITEM_HEALTH,
+        ITEM_AMMO, ITEM_HEALTH, ITEM_FIREBALL, ITEM_AMMO, ITEM_HEALTH,
+        ITEM_DAMAGE, ITEM_FIREBALL, ITEM_RAPID, ITEM_AMMO, ITEM_HEALTH,
+    };
+    for (int i = 0; i < MAX_ITEMS; ++i) {
+        double min_dist = i == 0 ? 2.0 : 24.0;
+        Vec2 pos = i == 0 ? (Vec2){4.5, 22.5} : pick_floor_spot(rng, game, min_dist);
+        game->items[i] = (Item){1, item_types[i], pos};
+    }
+}
+
+static void place_generated_monsters(GameState *game, LevelRng *rng, int boss_room, LevelRoom room)
+{
+    game->monster_count = MAX_MONSTERS;
+    static const int monster_types[MAX_MONSTERS] = {1, 1, 1, 0, 1, 1, 2, 1, 0, 1};
+    for (int i = 0; i < game->monster_count; ++i) {
+        Monster *monster = &game->monsters[i];
+        monster->active = 1;
+        monster->pos = boss_room && i == game->monster_count - 1
+            ? pick_floor_spot_in_rect(rng, game, room.x, room.y, room.w, room.h)
+            : pick_floor_spot(rng, game, i == game->monster_count - 1 ? 180.0 : 36.0);
+        monster->shoot_timer = 0.45 + i * 0.27;
+        monster->target_waypoint = 1;
+        monster->route = i;
+        monster->type = monster_types[i];
+        monster->hp = monster_max_hp(monster->type);
+        monster->facing = (Vec2){0.0, -1.0};
+        monster->ai_state = 0;
+        monster->last_seen = monster->pos;
+        monster->patrol[0] = monster->pos;
+        monster->patrol[1] = boss_room && i == game->monster_count - 1
+            ? pick_floor_spot_in_rect(rng, game, room.x, room.y, room.w, room.h)
+            : pick_floor_spot(rng, game, 30.0);
+        monster->patrol_count = 2;
+        monster->alert_timer = 0.0;
+        monster->strafe_timer = 0.4 + i * 0.11;
+        monster->strafe_dir = (i & 1) ? 1 : -1;
+        monster->pain_timer = 0.0;
+        monster->is_boss = i == game->monster_count - 1;
+        if (monster->is_boss) {
+            monster->type = 0;
+            monster->hp = boss_room ? 28 : 18;
+        }
+    }
+}
+
+static void carve_maze(LevelRng *rng)
+{
+    int stack_x[144];
+    int stack_y[144];
+    int top = 0;
+
+    carve_tile(3, 21);
+    stack_x[top] = 3;
+    stack_y[top] = 21;
+    top++;
+
+    while (top > 0) {
+        int cx = stack_x[top - 1];
+        int cy = stack_y[top - 1];
+        int dirs[4] = {0, 1, 2, 3};
+        for (int i = 0; i < 4; ++i) {
+            int j = rng_range(rng, i, 3);
+            int t = dirs[i];
+            dirs[i] = dirs[j];
+            dirs[j] = t;
+        }
+
+        int carved = 0;
+        for (int i = 0; i < 4; ++i) {
+            int dx = dirs[i] == 0 ? 2 : (dirs[i] == 1 ? -2 : 0);
+            int dy = dirs[i] == 2 ? 2 : (dirs[i] == 3 ? -2 : 0);
+            int nx = cx + dx;
+            int ny = cy + dy;
+            if (nx < 1 || nx > MAP_W - 3 || ny < 1 || ny > MAP_H - 3 || generated_floor(nx, ny)) {
+                continue;
+            }
+            carve_tile(cx + dx / 2, cy + dy / 2);
+            carve_tile(nx, ny);
+            stack_x[top] = nx;
+            stack_y[top] = ny;
+            top++;
+            carved = 1;
+            break;
+        }
+        if (!carved) {
+            top--;
+        }
+    }
+}
+
+static void carve_tight_level(GameState *game, LevelRng *rng)
+{
+    (void)game;
+    carve_room((LevelRoom){1, 20, 5, 3});
+    carve_maze(rng);
+    carve_room((LevelRoom){19, 1, 4, 3});
+    carve_h_corridor(19, 21, 3);
+}
+
+static void generate_rooms_level(LevelRng *rng, uint32_t seed)
+{
+    LevelRoom rooms[MAX_LEVEL_ROOMS];
+    int room_count = 0;
+
+    level_fill_walls(seed);
+    rooms[room_count++] = (LevelRoom){1, 20, 5, 3};
+
+    for (int gy = 0; gy < 3 && room_count < MAX_LEVEL_ROOMS; ++gy) {
+        for (int gx = 0; gx < 3 && room_count < MAX_LEVEL_ROOMS; ++gx) {
+            int x = 1 + gx * 7 + rng_range(rng, 0, 2);
+            int y = 1 + gy * 6 + rng_range(rng, 0, 2);
+            int w = 4 + rng_range(rng, 0, 2);
+            int h = 4 + rng_range(rng, 0, 2);
+            if (x + w >= MAP_W - 1) w = MAP_W - 2 - x;
+            if (y + h >= MAP_H - 1) h = MAP_H - 2 - y;
+            rooms[room_count++] = (LevelRoom){x, y, w, h};
+        }
+    }
+
+    for (int i = 0; i < room_count; ++i) {
+        carve_room(rooms[i]);
+    }
+    for (int i = 1; i < room_count; ++i) {
+        Vec2 a = room_center(rooms[i - 1]);
+        Vec2 b = room_center(rooms[i]);
+        if (rng_next(rng) & 1u) {
+            carve_h_corridor((int)a.x, (int)b.x, (int)a.y);
+            carve_v_corridor((int)b.x, (int)a.y, (int)b.y);
+        } else {
+            carve_v_corridor((int)a.x, (int)a.y, (int)b.y);
+            carve_h_corridor((int)a.x, (int)b.x, (int)b.y);
+        }
+    }
+    carve_h_corridor(2, (int)room_center(rooms[1]).x, 22);
+    carve_v_corridor((int)room_center(rooms[1]).x, (int)room_center(rooms[1]).y, 22);
+}
+
+static void generate_level(GameState *game, uint32_t seed, int mode)
+{
+    LevelRng rng = {seed ? seed : LEVEL_TEST_SEED};
+    LevelRoom boss_room = {15, 1, 8, 7};
+    level_fill_walls(seed);
+
+    if (mode == GENERATOR_TIGHT) {
+        carve_tight_level(game, &rng);
+    } else if (mode == GENERATOR_BOSS) {
+        carve_tight_level(game, &rng);
+        carve_room(boss_room);
+        carve_v_corridor(18, 7, 10);
+        game->doors[0] = (Door){18, 8, 1, 0, 0, 0.0};
+    } else {
+        generate_rooms_level(&rng, seed);
+    }
+
+    if (mode == GENERATOR_BOSS) {
+        game->doors[0] = (Door){18, 8, 1, 0, 0, 0.0};
+    } else {
+        place_generated_doors(game, &rng);
+    }
+    place_generated_secrets(game, &rng);
+    place_generated_torches(game);
+    place_generated_items(game, &rng);
+    place_generated_monsters(game, &rng, mode == GENERATOR_BOSS, boss_room);
+}
+
+static void init_game_seed(GameState *game, uint32_t seed, int mode)
 {
     memset(game, 0, sizeof(*game));
-    game->monster_count = MAX_MONSTERS;
+    active_game = game;
+    game->generator_mode = mode;
     game->player_health = PLAYER_MAX_HEALTH;
     game->ammo = START_AMMO;
     game->fireball_ammo = START_FIREBALL_AMMO;
     game->selected_weapon = WEAPON_PISTOL;
     game->fireball_unlocked = 0;
+    generate_level(game, seed, mode);
+}
 
-    const Vec2 starts[MAX_MONSTERS] = {
-        {12.5, 8.5},
-        {20.5, 3.5},
-        {3.5, 12.5},
-        {18.5, 15.5},
-        {8.5, 20.5},
-        {7.5, 22.5},
-        {3.5, 3.5},
-        {11.5, 12.5},
-        {16.5, 15.5},
-        {21.5, 20.5},
-    };
-    const Item item_starts[MAX_ITEMS] = {
-        {1, ITEM_AMMO, {4.5, 22.5}},
-        {1, ITEM_HEALTH, {9.5, 22.5}},
-        {1, ITEM_RAPID, {5.5, 12.5}},
-        {1, ITEM_FIREBALL, {12.5, 12.5}},
-        {1, ITEM_AMMO, {20.5, 20.5}},
-        {1, ITEM_HEALTH, {3.5, 3.5}},
-        {1, ITEM_RAPID, {18.5, 15.5}},
-        {1, ITEM_DAMAGE, {20.5, 3.5}},
-        {1, ITEM_AMMO, {1.5, 15.5}},
-        {1, ITEM_HEALTH, {16.5, 22.5}},
-        {1, ITEM_AMMO, {14.5, 8.5}},
-        {1, ITEM_HEALTH, {18.5, 18.5}},
-        {1, ITEM_FIREBALL, {10.5, 2.5}},
-        {1, ITEM_AMMO, {6.5, 6.5}},
-        {1, ITEM_HEALTH, {14.5, 13.5}},
-        {1, ITEM_DAMAGE, {16.5, 16.5}},
-        {1, ITEM_FIREBALL, {9.5, 18.5}},
-        {1, ITEM_RAPID, {20.5, 12.5}},
-        {1, ITEM_AMMO, {3.5, 20.5}},
-        {1, ITEM_HEALTH, {13.5, 20.5}},
-    };
-
-    for (int i = 0; i < MAX_ITEMS; ++i) {
-        game->items[i] = item_starts[i];
-    }
-
-    for (int i = 0; i < game->monster_count; ++i) {
-        Monster *monster = &game->monsters[i];
-        monster->active = 1;
-        monster->pos = starts[i];
-        monster->shoot_timer = 0.45 + i * 0.27;
-        monster->target_waypoint = 1;
-        monster->route = i;
-        static const int monster_types[MAX_MONSTERS] = {1, 1, 1, 0, 1, 1, 2, 1, 0, 1};
-        monster->type = monster_types[i];
-        monster->hp = monster_max_hp(monster->type);
-        monster->facing = (Vec2){0.0, -1.0};
-        monster->ai_state = 0;
-        monster->last_seen = starts[i];
-        monster->alert_timer = 0.0;
-        monster->strafe_timer = 0.4 + i * 0.11;
-        monster->strafe_dir = (i & 1) ? 1 : -1;
-        monster->pain_timer = 0.0;
-    }
+static void init_game(GameState *game)
+{
+    init_game_seed(game, LEVEL_TEST_SEED, GENERATOR_ROOMS);
 }
 
 static int can_occupy(double x, double y, double radius)
@@ -1641,104 +2514,12 @@ static int move_monster_toward(Monster *monster, Vec2 target, double speed, doub
 
 static void update_monster(Monster *monster, const Camera *cam, double dt)
 {
-    static const Vec2 route0[] = {
-        {12.5, 8.5},
-        {12.5, 3.5},
-    };
-    static const Vec2 route1[] = {
-        {20.5, 3.5},
-        {20.5, 8.5},
-    };
-    static const Vec2 route2[] = {
-        {3.5, 12.5},
-        {5.5, 12.5},
-        {5.5, 15.5},
-        {1.5, 15.5},
-    };
-    static const Vec2 route3[] = {
-        {18.5, 15.5},
-        {20.5, 15.5},
-        {20.5, 18.5},
-        {17.5, 18.5},
-    };
-    static const Vec2 route4[] = {
-        {6.5, 20.5},
-        {8.5, 20.5},
-        {8.5, 22.0},
-        {5.5, 22.0},
-    };
-    static const Vec2 route5[] = {
-        {7.5, 22.5},
-        {11.5, 22.5},
-        {15.5, 22.5},
-    };
-    static const Vec2 route6[] = {
-        {3.5, 3.5},
-        {5.5, 3.5},
-        {5.5, 5.5},
-        {1.5, 5.5},
-    };
-    static const Vec2 route7[] = {
-        {11.5, 12.5},
-        {12.5, 12.5},
-        {12.5, 15.5},
-        {9.5, 15.5},
-    };
-    static const Vec2 route8[] = {
-        {16.5, 15.5},
-        {18.5, 15.5},
-        {18.5, 17.5},
-        {16.5, 17.5},
-    };
-    static const Vec2 route9[] = {
-        {21.5, 20.5},
-        {18.5, 20.5},
-        {18.5, 22.5},
-        {22.0, 22.5},
-    };
-    const Vec2 *waypoints = route0;
-    int waypoint_count = (int)(sizeof(route0) / sizeof(route0[0]));
-
-    switch (monster->route) {
-    case 1:
-        waypoints = route1;
-        waypoint_count = (int)(sizeof(route1) / sizeof(route1[0]));
-        break;
-    case 2:
-        waypoints = route2;
-        waypoint_count = (int)(sizeof(route2) / sizeof(route2[0]));
-        break;
-    case 3:
-        waypoints = route3;
-        waypoint_count = (int)(sizeof(route3) / sizeof(route3[0]));
-        break;
-    case 4:
-        waypoints = route4;
-        waypoint_count = (int)(sizeof(route4) / sizeof(route4[0]));
-        break;
-    case 5:
-        waypoints = route5;
-        waypoint_count = (int)(sizeof(route5) / sizeof(route5[0]));
-        break;
-    case 6:
-        waypoints = route6;
-        waypoint_count = (int)(sizeof(route6) / sizeof(route6[0]));
-        break;
-    case 7:
-        waypoints = route7;
-        waypoint_count = (int)(sizeof(route7) / sizeof(route7[0]));
-        break;
-    case 8:
-        waypoints = route8;
-        waypoint_count = (int)(sizeof(route8) / sizeof(route8[0]));
-        break;
-    case 9:
-        waypoints = route9;
-        waypoint_count = (int)(sizeof(route9) / sizeof(route9[0]));
-        break;
-    }
-
     if (!monster->active) {
+        return;
+    }
+    const Vec2 *waypoints = monster->patrol;
+    int waypoint_count = monster->patrol_count;
+    if (waypoint_count <= 0) {
         return;
     }
 
@@ -1824,6 +2605,7 @@ static void update_monster(Monster *monster, const Camera *cam, double dt)
 
 static void spawn_explosion(GameState *game, Vec2 pos, double radius)
 {
+    play_sound(92.0, 0.24, 0.34);
     for (int i = 0; i < MAX_PROJECTILES; ++i) {
         Projectile *p = &game->projectiles[i];
         if (!p->active) {
@@ -1834,7 +2616,37 @@ static void spawn_explosion(GameState *game, Vec2 pos, double radius)
             p->pos = pos;
             p->life = 0.22;
             p->radius = radius;
-            return;
+            break;
+        }
+    }
+
+    for (int i = 0; i < MAX_DECALS; ++i) {
+        Decal *d = &game->decals[i];
+        if (!d->active) {
+            d->active = 1;
+            d->type = 0;
+            d->pos = pos;
+            d->radius = radius * 0.85;
+            d->life = 30.0;
+            break;
+        }
+    }
+
+    for (int i = 0; i < 10; ++i) {
+        for (int j = 0; j < MAX_PARTICLES; ++j) {
+            Particle *p = &game->particles[j];
+            if (!p->active) {
+                double a = i * (M_PI * 2.0 / 10.0);
+                double speed = 0.28 + (i % 3) * 0.10;
+                p->active = 1;
+                p->pos = pos;
+                p->vel = (Vec2){cos(a) * speed, sin(a) * speed};
+                p->life = 0.85 + (i % 4) * 0.08;
+                p->max_life = p->life;
+                p->size = 0.32 + (i % 3) * 0.08;
+                p->color = i & 1 ? rgb(96, 74, 58) : rgb(146, 70, 34);
+                break;
+            }
         }
     }
 }
@@ -1976,7 +2788,7 @@ static void update_projectiles(GameState *game, const Camera *cam, double dt)
         if (p->owner == PROJECTILE_OWNER_ENEMY) {
             double dx = p->pos.x - cam->pos.x;
             double dy = p->pos.y - cam->pos.y;
-            if (dx * dx + dy * dy < 0.18) {
+            if (dx * dx + dy * dy < 0.18 && game->hit_flash <= 0.0) {
                 p->active = 0;
                 game->player_health -= p->damage;
                 if (game->player_health <= 0) {
@@ -2026,7 +2838,7 @@ static void pickup_item(GameState *game, Item *item)
     case ITEM_DAMAGE:
         game->damage_timer = 12.0;
         break;
-    default:
+    case ITEM_FIREBALL:
         game->fireball_unlocked = 1;
         game->selected_weapon = WEAPON_FIREBALL;
         game->fireball_ammo += 6;
@@ -2034,9 +2846,13 @@ static void pickup_item(GameState *game, Item *item)
             game->fireball_ammo = MAX_FIREBALL_AMMO;
         }
         break;
+    default:
+        game->keys += 1;
+        break;
     }
 
     game->pickup_flash = 0.22;
+    play_sound(item->type == ITEM_KEY ? 720.0 : 640.0, 0.09, 0.18);
     item->active = 0;
 }
 
@@ -2064,6 +2880,33 @@ static void select_weapon(GameState *game, int weapon)
     game->selected_weapon = weapon;
 }
 
+static void interact_world(GameState *game, const Camera *cam)
+{
+    int tx = (int)(cam->pos.x + cam->dir.x * 0.95);
+    int ty = (int)(cam->pos.y + cam->dir.y * 0.95);
+
+    for (int i = 0; i < MAX_DOORS; ++i) {
+        Door *door = &game->doors[i];
+        if (door->x == tx && door->y == ty && !door->open) {
+            if (!door->locked || game->keys > 0) {
+                door->opening = 1;
+                door->locked = 0;
+                play_sound(160.0, 0.18, 0.20);
+            }
+            return;
+        }
+    }
+
+    for (int i = 0; i < MAX_SECRETS; ++i) {
+        Secret *secret = &game->secrets[i];
+        if (secret->x == tx && secret->y == ty && !secret->open) {
+            secret->opening = 1;
+            play_sound(118.0, 0.24, 0.22);
+            return;
+        }
+    }
+}
+
 static void player_fire(GameState *game, const Camera *cam)
 {
     if (game->game_over || game->victory || game->shot_cooldown > 0.0) {
@@ -2077,6 +2920,7 @@ static void player_fire(GameState *game, const Camera *cam)
         if (!spawn_player_fireball(game, cam)) {
             return;
         }
+        play_sound(260.0, 0.20, 0.28);
         game->fireball_ammo -= 1;
         game->shot_cooldown = game->rapid_timer > 0.0 ? FIREBALL_COOLDOWN_TIME * 0.70 : FIREBALL_COOLDOWN_TIME;
         game->weapon_flash = FIREBALL_FLASH_TIME;
@@ -2089,6 +2933,7 @@ static void player_fire(GameState *game, const Camera *cam)
     }
 
     game->ammo -= 1;
+    play_sound(520.0, 0.055, 0.18);
     game->shot_cooldown = game->rapid_timer > 0.0 ? SHOT_COOLDOWN_TIME * 0.48 : SHOT_COOLDOWN_TIME;
     game->weapon_flash = WEAPON_FLASH_TIME;
     game->shot_trace = WEAPON_FLASH_TIME;
@@ -2133,6 +2978,28 @@ static void update_game(GameState *game, const Camera *cam, double dt)
 {
     game->time += dt;
     reveal_fog(game, cam);
+
+    for (int i = 0; i < MAX_DOORS; ++i) {
+        Door *door = &game->doors[i];
+        if (door->opening && !door->open) {
+            door->open_amount += dt * 2.4;
+            if (door->open_amount >= 1.0) {
+                door->open_amount = 1.0;
+                door->open = 1;
+            }
+        }
+    }
+    for (int i = 0; i < MAX_SECRETS; ++i) {
+        Secret *secret = &game->secrets[i];
+        if (secret->opening && !secret->open) {
+            secret->open_amount += dt * 1.6;
+            if (secret->open_amount >= 1.0) {
+                secret->open_amount = 1.0;
+                secret->open = 1;
+                level_map[secret->y][secret->x] = 0;
+            }
+        }
+    }
 
     for (int i = 0; i < game->monster_count; ++i) {
         Monster *monster = &game->monsters[i];
@@ -2208,6 +3075,35 @@ static void update_game(GameState *game, const Camera *cam, double dt)
         }
     }
 
+    for (int i = 0; i < MAX_DECALS; ++i) {
+        Decal *decal = &game->decals[i];
+        if (decal->active) {
+            decal->life -= dt;
+            if (decal->life <= 0.0) {
+                decal->active = 0;
+            }
+        }
+    }
+
+    for (int i = 0; i < MAX_PARTICLES; ++i) {
+        Particle *particle = &game->particles[i];
+        if (!particle->active) {
+            continue;
+        }
+        particle->life -= dt;
+        if (particle->life <= 0.0) {
+            particle->active = 0;
+            continue;
+        }
+        particle->pos.x += particle->vel.x * dt;
+        particle->pos.y += particle->vel.y * dt;
+        particle->vel.x *= 1.0 - dt * 0.45;
+        particle->vel.y *= 1.0 - dt * 0.45;
+        if (!can_occupy(particle->pos.x, particle->pos.y, 0.05)) {
+            particle->active = 0;
+        }
+    }
+
     if (game->kills >= game->monster_count) {
         game->victory = 1;
     }
@@ -2245,16 +3141,27 @@ static int verify_player_weapon(void)
         .dir = {1.0, 0.0},
         .plane = {0.0, 0.66},
     };
+    game.monster_count = 1;
+    memset(game.monsters, 0, sizeof(game.monsters));
+    game.monsters[0] = (Monster){
+        .active = 1,
+        .hp = 4,
+        .pos = {5.5, 22.5},
+        .type = 1,
+        .facing = {-1.0, 0.0},
+        .patrol_count = 1,
+        .patrol = {{5.5, 22.5}},
+    };
 
     player_fire(&game, &cam);
-    if (game.ammo != START_AMMO - 1 || game.monsters[5].hp != 2 || !game.monsters[5].active) {
+    if (game.ammo != START_AMMO - 1 || game.monsters[0].hp != 2 || !game.monsters[0].active) {
         fprintf(stderr, "error: player weapon failed first hit verification\n");
         return 0;
     }
 
     game.shot_cooldown = 0.0;
     player_fire(&game, &cam);
-    if (game.ammo != START_AMMO - 2 || game.monsters[5].active || game.kills != 1) {
+    if (game.ammo != START_AMMO - 2 || game.monsters[0].active || game.kills != 1) {
         fprintf(stderr, "error: player weapon failed kill verification\n");
         return 0;
     }
@@ -2271,7 +3178,18 @@ static int verify_monster_shot_direction(void)
         .dir = {1.0, 0.0},
         .plane = {0.0, 0.66},
     };
-    Monster *monster = &game.monsters[5];
+    game.monster_count = 1;
+    memset(game.monsters, 0, sizeof(game.monsters));
+    game.monsters[0] = (Monster){
+        .active = 1,
+        .hp = 4,
+        .pos = {5.5, 22.5},
+        .type = 1,
+        .facing = {-1.0, 0.0},
+        .patrol_count = 1,
+        .patrol = {{5.5, 22.5}},
+    };
+    Monster *monster = &game.monsters[0];
 
     spawn_monster_shot(&game, monster, &cam);
     Projectile *shot = NULL;
@@ -2314,7 +3232,18 @@ static int verify_monster_ai_reacts(void)
         .dir = {1.0, 0.0},
         .plane = {0.0, 0.66},
     };
-    Monster *monster = &game.monsters[5];
+    game.monster_count = 1;
+    memset(game.monsters, 0, sizeof(game.monsters));
+    game.monsters[0] = (Monster){
+        .active = 1,
+        .hp = 4,
+        .pos = {5.5, 22.5},
+        .type = 1,
+        .facing = {-1.0, 0.0},
+        .patrol_count = 1,
+        .patrol = {{5.5, 22.5}},
+    };
+    Monster *monster = &game.monsters[0];
 
     update_monster(monster, &cam, 1.0 / 60.0);
     if (monster->ai_state == 0 || monster->alert_timer <= 0.0) {
@@ -2350,10 +3279,21 @@ static int verify_items_and_fog(void)
         }
     }
 
+    int ammo_item = -1;
+    for (int i = 0; i < MAX_ITEMS; ++i) {
+        if (game.items[i].active && game.items[i].type == ITEM_AMMO) {
+            ammo_item = i;
+            break;
+        }
+    }
     game.ammo = 10;
-    cam.pos = game.items[0].pos;
+    if (ammo_item < 0) {
+        fprintf(stderr, "error: no ammo pickup available for verification\n");
+        return 0;
+    }
+    cam.pos = game.items[ammo_item].pos;
     update_items(&game, &cam);
-    if (game.items[0].active || game.ammo <= 10 || game.pickup_flash <= 0.0) {
+    if (game.items[ammo_item].active || game.ammo <= 10 || game.pickup_flash <= 0.0) {
         fprintf(stderr, "error: item pickup verification failed\n");
         return 0;
     }
@@ -2492,6 +3432,13 @@ static int verify_monster_roles(void)
 
     for (int i = 0; i < game.monster_count; ++i) {
         Monster *monster = &game.monsters[i];
+        if (monster->is_boss) {
+            if (monster->type != 0 || monster->hp != 18) {
+                fprintf(stderr, "error: boss monster role is not deterministic\n");
+                return 0;
+            }
+            continue;
+        }
         if (monster->hp != monster_max_hp(monster->type)) {
             fprintf(stderr, "error: monster %d hp does not match its role\n", i);
             return 0;
@@ -2507,6 +3454,132 @@ static int verify_monster_roles(void)
           monster_projectile_damage(1) > monster_projectile_damage(2))) {
         fprintf(stderr, "error: monster projectile damage roles are not ordered as expected\n");
         return 0;
+    }
+
+    return 1;
+}
+
+static int setup_interaction_camera(Camera *cam, int tx, int ty)
+{
+    static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    for (int i = 0; i < 4; ++i) {
+        int px = tx + dirs[i][0];
+        int py = ty + dirs[i][1];
+        if (!generated_floor(px, py)) {
+            continue;
+        }
+        cam->pos = (Vec2){px + 0.5, py + 0.5};
+        cam->dir = (Vec2){-dirs[i][0], -dirs[i][1]};
+        cam->plane = (Vec2){-cam->dir.y * 0.66, cam->dir.x * 0.66};
+        return 1;
+    }
+    return 0;
+}
+
+static int verify_doors_and_secrets(void)
+{
+    GameState game;
+    init_game(&game);
+    Camera cam;
+    int door_index = -1;
+
+    for (int i = 0; i < MAX_DOORS; ++i) {
+        if (game.doors[i].locked) {
+            door_index = i;
+            break;
+        }
+    }
+    if (door_index < 0 || !setup_interaction_camera(&cam, game.doors[door_index].x, game.doors[door_index].y)) {
+        fprintf(stderr, "error: generated level has no usable locked door\n");
+        return 0;
+    }
+
+    if (map_at(game.doors[door_index].x, game.doors[door_index].y) == 0) {
+        fprintf(stderr, "error: locked door does not block before interaction\n");
+        return 0;
+    }
+
+    interact_world(&game, &cam);
+    if (game.doors[door_index].opening || game.doors[door_index].open) {
+        fprintf(stderr, "error: locked door opened without a key\n");
+        return 0;
+    }
+
+    game.keys = 1;
+    interact_world(&game, &cam);
+    for (int i = 0; i < 32; ++i) {
+        update_game(&game, &cam, 1.0 / 60.0);
+    }
+    if (!game.doors[door_index].open || map_at(game.doors[door_index].x, game.doors[door_index].y) != 0) {
+        fprintf(stderr, "error: keyed door did not open cleanly\n");
+        return 0;
+    }
+
+    int secret_index = -1;
+    for (int i = 0; i < MAX_SECRETS; ++i) {
+        if (setup_interaction_camera(&cam, game.secrets[i].x, game.secrets[i].y)) {
+            secret_index = i;
+            break;
+        }
+    }
+    if (secret_index < 0) {
+        fprintf(stderr, "error: generated level has no usable secret\n");
+        return 0;
+    }
+    if (map_at(game.secrets[secret_index].x, game.secrets[secret_index].y) == 0) {
+        fprintf(stderr, "error: secret does not block before interaction\n");
+        return 0;
+    }
+    interact_world(&game, &cam);
+    for (int i = 0; i < 45; ++i) {
+        update_game(&game, &cam, 1.0 / 60.0);
+    }
+    if (!game.secrets[secret_index].open || map_at(game.secrets[secret_index].x, game.secrets[secret_index].y) != 0) {
+        fprintf(stderr, "error: secret wall did not open cleanly\n");
+        return 0;
+    }
+
+    return 1;
+}
+
+static int verify_generator_modes(void)
+{
+    for (int mode = 0; mode < GENERATOR_COUNT; ++mode) {
+        GameState game;
+        init_game_seed(&game, LEVEL_TEST_SEED + (uint32_t)mode * 97u, mode);
+
+        if (game.generator_mode != mode || !can_move(2.5, 22.5) || !can_occupy(4.5, 22.5, 0.12)) {
+            fprintf(stderr, "error: generator mode %d did not create a valid entrance\n", mode);
+            return 0;
+        }
+
+        for (int i = 0; i < MAX_ITEMS; ++i) {
+            if (game.items[i].active && !can_occupy(game.items[i].pos.x, game.items[i].pos.y, 0.12)) {
+                fprintf(stderr, "error: generator mode %d placed item %d inside a wall\n", mode, i);
+                return 0;
+            }
+        }
+        for (int i = 0; i < game.monster_count; ++i) {
+            if (game.monsters[i].active && !can_occupy(game.monsters[i].pos.x, game.monsters[i].pos.y, 0.28)) {
+                fprintf(stderr, "error: generator mode %d placed monster %d inside a wall\n", mode, i);
+                return 0;
+            }
+        }
+
+        if (mode == GENERATOR_TIGHT && !generated_floor(21, 2)) {
+            fprintf(stderr, "error: tight generator did not create a far exit room\n");
+            return 0;
+        }
+        if (mode == GENERATOR_BOSS) {
+            Monster *boss = &game.monsters[game.monster_count - 1];
+            if (!boss->is_boss || boss->hp < 28 ||
+                boss->pos.x < 15.0 || boss->pos.x > 23.0 ||
+                boss->pos.y < 1.0 || boss->pos.y > 8.0 ||
+                !game.doors[0].locked || game.doors[0].x != 18 || game.doors[0].y != 8) {
+                fprintf(stderr, "error: boss generator did not create boss chamber setup\n");
+                return 0;
+            }
+        }
     }
 
     return 1;
@@ -2548,6 +3621,9 @@ static int verify_sprite_sort_order(void)
 
 static int verify_torches(void)
 {
+    GameState game;
+    init_game(&game);
+
     for (int i = 0; i < MAX_TORCHES; ++i) {
         Vec2 pos = torches[i].pos;
         int cx = (int)pos.x;
@@ -2607,7 +3683,7 @@ static int verify_volumetric_fog(void)
     return 1;
 }
 
-static void move_camera(Camera *cam, double forward, double strafe, double dt)
+static void move_camera(Camera *cam, const GameState *game, double forward, double strafe, double dt)
 {
     double speed = 3.2 * dt;
     double nx = cam->pos.x + cam->dir.x * forward * speed + cam->plane.x * strafe * speed;
@@ -2618,6 +3694,28 @@ static void move_camera(Camera *cam, double forward, double strafe, double dt)
     }
     if (can_move(cam->pos.x, ny)) {
         cam->pos.y = ny;
+    }
+
+    for (int i = 0; i < game->monster_count; ++i) {
+        const Monster *monster = &game->monsters[i];
+        if (!monster->active) {
+            continue;
+        }
+        Vec2 diff = {cam->pos.x - monster->pos.x, cam->pos.y - monster->pos.y};
+        double dist = vec_len(diff);
+        double min_dist = monster->is_boss ? 0.72 : 0.48;
+        if (dist > 0.001 && dist < min_dist) {
+            Vec2 push = vec_norm(diff);
+            double amount = (min_dist - dist) * 0.45;
+            double px = cam->pos.x + push.x * amount;
+            double py = cam->pos.y + push.y * amount;
+            if (can_move(px, cam->pos.y)) {
+                cam->pos.x = px;
+            }
+            if (can_move(cam->pos.x, py)) {
+                cam->pos.y = py;
+            }
+        }
     }
 }
 
@@ -2632,6 +3730,17 @@ static void rotate_camera(Camera *cam, double amount)
     cam->dir.y = old_dir_x * s + cam->dir.y * c;
     cam->plane.x = cam->plane.x * c - cam->plane.y * s;
     cam->plane.y = old_plane_x * s + cam->plane.y * c;
+}
+
+static void reset_run(GameState *game, Camera *cam)
+{
+    *cam = (Camera){
+        .pos = {2.5, 22.5},
+        .dir = {1.0, 0.0},
+        .plane = {0.0, 0.66},
+    };
+    init_game_seed(game, runtime_level_seed++, runtime_level_mode);
+    reveal_fog(game, cam);
 }
 
 static int write_ppm(const char *path)
@@ -2691,6 +3800,12 @@ static int dump_frame(const char *path)
     if (!verify_monster_roles()) {
         return 1;
     }
+    if (!verify_doors_and_secrets()) {
+        return 1;
+    }
+    if (!verify_generator_modes()) {
+        return 1;
+    }
     if (!verify_sprite_sort_order()) {
         return 1;
     }
@@ -2727,8 +3842,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    if (!init_audio()) {
+        SDL_Quit();
         return 1;
     }
 
@@ -2741,6 +3860,7 @@ int main(int argc, char **argv)
         SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+        SDL_CloseAudioDevice(audio_device);
         SDL_Quit();
         return 1;
     }
@@ -2752,6 +3872,7 @@ int main(int argc, char **argv)
     if (!renderer) {
         fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
         SDL_DestroyWindow(window);
+        SDL_CloseAudioDevice(audio_device);
         SDL_Quit();
         return 1;
     }
@@ -2767,22 +3888,21 @@ int main(int argc, char **argv)
         fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
+        SDL_CloseAudioDevice(audio_device);
         SDL_Quit();
         return 1;
     }
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
 
-    Camera cam = {
-        .pos = {2.5, 22.5},
-        .dir = {1.0, 0.0},
-        .plane = {0.0, 0.66},
-    };
+    Camera cam;
     GameState game;
-    init_game(&game);
-    reveal_fog(&game, &cam);
+    runtime_level_seed = LEVEL_TEST_SEED ^ (uint32_t)SDL_GetTicks() ^ (uint32_t)SDL_GetPerformanceCounter();
+    reset_run(&game, &cam);
 
     int running = 1;
+    int paused = 0;
+    int fullscreen = 0;
     uint64_t prev = SDL_GetPerformanceCounter();
 
     while (running) {
@@ -2796,10 +3916,43 @@ int main(int argc, char **argv)
                 select_weapon(&game, WEAPON_PISTOL);
             } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_2) {
                 select_weapon(&game, WEAPON_FIREBALL);
+            } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_3 && event.key.repeat == 0) {
+                runtime_level_mode = GENERATOR_ROOMS;
+                reset_run(&game, &cam);
+                paused = 0;
+            } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_4 && event.key.repeat == 0) {
+                runtime_level_mode = GENERATOR_TIGHT;
+                reset_run(&game, &cam);
+                paused = 0;
+            } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_5 && event.key.repeat == 0) {
+                runtime_level_mode = GENERATOR_BOSS;
+                reset_run(&game, &cam);
+                paused = 0;
             } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_SPACE) {
-                player_fire(&game, &cam);
+                if (!paused) {
+                    player_fire(&game, &cam);
+                }
+            } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_f) {
+                if (!paused) {
+                    interact_world(&game, &cam);
+                }
+            } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_TAB && event.key.repeat == 0) {
+                game.show_automap = !game.show_automap;
+            } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_p && event.key.repeat == 0) {
+                paused = !paused;
+            } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_r && event.key.repeat == 0) {
+                reset_run(&game, &cam);
+                paused = 0;
+            } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_F11 && event.key.repeat == 0) {
+                fullscreen = !fullscreen;
+                if (SDL_SetWindowFullscreen(window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {
+                    fprintf(stderr, "SDL_SetWindowFullscreen failed: %s\n", SDL_GetError());
+                    running = 0;
+                }
             } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
-                player_fire(&game, &cam);
+                if (!paused) {
+                    player_fire(&game, &cam);
+                }
             }
         }
 
@@ -2822,18 +3975,21 @@ int main(int argc, char **argv)
         if (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]) turn -= 1.0;
         if (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) turn += 1.0;
 
-        if (!game.game_over && !game.victory && (forward != 0.0 || strafe != 0.0)) {
-            move_camera(&cam, forward, strafe, dt);
+        if (!paused && !game.game_over && !game.victory && (forward != 0.0 || strafe != 0.0)) {
+            move_camera(&cam, &game, forward, strafe, dt);
         }
-        if (!game.game_over && !game.victory && turn != 0.0) {
+        if (!paused && !game.game_over && !game.victory && turn != 0.0) {
             rotate_camera(&cam, turn * 2.2 * dt);
         }
 
-        if (!game.game_over && !game.victory) {
+        if (!paused && !game.game_over && !game.victory) {
             update_items(&game, &cam);
             update_game(&game, &cam, dt);
         }
         render_scene(&cam, &game);
+        if (paused) {
+            render_pause_overlay();
+        }
         SDL_UpdateTexture(screen, NULL, framebuffer, SCREEN_W * (int)sizeof(uint32_t));
 
         SDL_RenderClear(renderer);
@@ -2842,6 +3998,9 @@ int main(int argc, char **argv)
     }
 
     SDL_DestroyTexture(screen);
+    if (audio_device) {
+        SDL_CloseAudioDevice(audio_device);
+    }
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
