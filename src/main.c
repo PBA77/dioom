@@ -1,5 +1,9 @@
 #include <SDL2/SDL.h>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
@@ -15,14 +19,22 @@
 #define TEX_COUNT 8
 #define SPRITE_SIZE 64
 #define SPRITE_FRAMES 4
-#define MONSTER_TYPES 4
+#define MONSTER_TYPES 5
 #define TREE_TYPES 4
+#define DECAL_SIZE 64
+#define DECAL_COUNT 16
+#define WALL_DECAL_SIZE 64
+#define WALL_DECAL_COUNT 16
 #define PROJECTILE_SIZE 32
+#define ITEM_SPRITE_COUNT 16
+#define WEAPON_SPRITE_SIZE 64
+#define WEAPON_SPRITE_COUNT 6
 #define MAX_PROJECTILES 20
 #define MAX_MONSTERS 10
-#define MAX_ITEMS 20
+#define MAX_ITEMS 28
 #define MAX_TORCHES 26
-#define MAX_DECALS 32
+#define MAX_DECALS 96
+#define MAX_WALL_DECALS 64
 #define MAX_PARTICLES 64
 #define MAX_TREES 96
 #define MAX_DOORS 4
@@ -50,13 +62,20 @@
 #define FIREBALL_RADIUS 1.25
 #define FOG_DENSITY 0.165
 #define FOG_PASS_STRENGTH 1.10
+#define FOG_LUT_SIZE 4096
+#define FOG_LUT_MAX_DISTANCE 80.0
 #define MAP_W 24
 #define MAP_H 24
 #define TEXTURE_ATLAS_PATH "assets/textures.ppm"
 #define MONSTER_ATLAS_PATH "assets/monsters.ppm"
 #define TREE_ATLAS_PATH "assets/trees.ppm"
 #define RELIC_ATLAS_PATH "assets/relics.ppm"
+#define ITEM_ATLAS_PATH "assets/items.ppm"
+#define WEAPON_ATLAS_PATH "assets/weapons.ppm"
+#define DECAL_ATLAS_PATH "assets/decals.ppm"
+#define WALL_DECAL_ATLAS_PATH "assets/wall_decals.ppm"
 #define MAX_SAMPLE_VOICES 16
+#define MONSTER_FLYING_HEAD 4
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -66,6 +85,13 @@ typedef struct {
     double x;
     double y;
 } Vec2;
+
+typedef struct {
+    double roughness;
+    double metallic;
+    double wetness;
+    double normal_strength;
+} Material;
 
 enum {
     WEAPON_KNIFE = 0,
@@ -94,6 +120,37 @@ enum {
     ITEM_PISTOL = 5,
     ITEM_KEY = 6,
     ITEM_RELIC = 7,
+    ITEM_GOLD = 8,
+    ITEM_SHRINE = 9,
+    ITEM_BONEPILE = 10,
+};
+
+enum {
+    ITEM_SPRITE_HEALTH = 0,
+    ITEM_SPRITE_AMMO,
+    ITEM_SPRITE_RAPID,
+    ITEM_SPRITE_DAMAGE,
+    ITEM_SPRITE_FIREBALL,
+    ITEM_SPRITE_PISTOL,
+    ITEM_SPRITE_KEY,
+    ITEM_SPRITE_GOLD,
+    ITEM_SPRITE_SHRINE,
+    ITEM_SPRITE_BONEPILE,
+    ITEM_SPRITE_PORTAL_DUNGEON,
+    ITEM_SPRITE_PORTAL_FOREST,
+    ITEM_SPRITE_PORTAL_BOSS_LOCKED,
+    ITEM_SPRITE_PORTAL_BOSS_OPEN,
+    ITEM_SPRITE_BOLT,
+    ITEM_SPRITE_EXPLOSION,
+};
+
+enum {
+    WEAPON_SPRITE_KNIFE = 0,
+    WEAPON_SPRITE_KNIFE_SLASH,
+    WEAPON_SPRITE_PISTOL,
+    WEAPON_SPRITE_PISTOL_FLASH,
+    WEAPON_SPRITE_FIREBALL,
+    WEAPON_SPRITE_FIREBALL_CAST,
 };
 
 enum {
@@ -116,6 +173,11 @@ enum {
     SFX_DOOR,
     SFX_LOCKED,
     SFX_COUNT,
+};
+
+enum {
+    RENDER_QUALITY_PBR = 0,
+    RENDER_QUALITY_FAST = 1,
 };
 
 typedef struct {
@@ -203,10 +265,26 @@ typedef struct {
 typedef struct {
     int active;
     int type;
+    int variant;
     Vec2 pos;
     double radius;
     double life;
+    double max_life;
+    double angle;
 } Decal;
+
+typedef struct {
+    int active;
+    int x;
+    int y;
+    int side;
+    int variant;
+    double u;
+    double v;
+    double width;
+    double height;
+    double strength;
+} WallDecal;
 
 typedef struct {
     int active;
@@ -225,6 +303,7 @@ typedef struct {
     Item items[MAX_ITEMS];
     Tree trees[MAX_TREES];
     Decal decals[MAX_DECALS];
+    WallDecal wall_decals[MAX_WALL_DECALS];
     Particle particles[MAX_PARTICLES];
     Door doors[MAX_DOORS];
     Secret secrets[MAX_SECRETS];
@@ -237,6 +316,7 @@ typedef struct {
     int selected_weapon;
     int pistol_unlocked;
     int fireball_unlocked;
+    int gold;
     int kills;
     double shot_cooldown;
     double weapon_flash;
@@ -276,6 +356,16 @@ typedef struct {
 } SpriteDraw;
 
 typedef struct {
+    double floor_ms;
+    double wall_ms;
+    double sprite_ms;
+    double fog_ms;
+    double bloom_ms;
+    double post_ms;
+    double total_ms;
+} RenderProfile;
+
+typedef struct {
     Uint8 *data;
     Uint32 length;
 } SfxSample;
@@ -289,14 +379,40 @@ typedef struct {
 
 static uint32_t framebuffer[SCREEN_W * SCREEN_H];
 static uint32_t textures[TEX_COUNT][TEX_SIZE * TEX_SIZE];
+static double texture_luma[TEX_COUNT][TEX_SIZE * TEX_SIZE];
+static double texture_bump[TEX_COUNT][TEX_SIZE * TEX_SIZE];
+static double texture_bright[TEX_COUNT][TEX_SIZE * TEX_SIZE];
+static double texture_grad_x[TEX_COUNT][TEX_SIZE * TEX_SIZE];
+static double texture_grad_y[TEX_COUNT][TEX_SIZE * TEX_SIZE];
+static const Material texture_materials[TEX_COUNT] = {
+    {0.82, 0.00, 0.10, 0.42},
+    {0.76, 0.00, 0.08, 0.36},
+    {0.88, 0.00, 0.24, 0.50},
+    {0.94, 0.00, 0.02, 0.22},
+    {0.92, 0.00, 0.14, 0.30},
+    {0.86, 0.00, 0.38, 0.54},
+    {0.72, 0.00, 0.20, 0.48},
+    {0.80, 0.00, 0.28, 0.56},
+};
 static uint32_t monster_sprites[MONSTER_TYPES][SPRITE_FRAMES][SPRITE_SIZE * SPRITE_SIZE];
 static uint32_t tree_sprites[TREE_TYPES][SPRITE_SIZE * SPRITE_SIZE];
 static uint32_t relic_sprites[RELIC_COUNT][PROJECTILE_SIZE * PROJECTILE_SIZE];
+static uint32_t item_sprites[ITEM_SPRITE_COUNT][PROJECTILE_SIZE * PROJECTILE_SIZE];
+static uint32_t weapon_sprites[WEAPON_SPRITE_COUNT][WEAPON_SPRITE_SIZE * WEAPON_SPRITE_SIZE];
+static uint32_t decal_sprites[DECAL_COUNT][DECAL_SIZE * DECAL_SIZE];
+static uint32_t wall_decal_sprites[WALL_DECAL_COUNT][WALL_DECAL_SIZE * WALL_DECAL_SIZE];
 static double z_buffer[SCREEN_W];
 static double depth_buffer[SCREEN_W * SCREEN_H];
 static double glow_buffer[SCREEN_W * SCREEN_H];
 static double glow_blur_buffer[SCREEN_W * SCREEN_H];
 static double light_buffer[SCREEN_W * SCREEN_H];
+static double vignette_buffer[SCREEN_W * (SCREEN_H - 14)];
+static int vignette_ready = 0;
+static double fog_lut[FOG_LUT_SIZE + 1];
+static double forest_fog_lut[FOG_LUT_SIZE + 1];
+static int fog_lut_ready = 0;
+static RenderProfile *active_profile = NULL;
+static int render_quality = RENDER_QUALITY_PBR;
 static GameState *active_game = NULL;
 static SfxSample sfx_samples[SFX_COUNT];
 static SampleVoice sample_voices[MAX_SAMPLE_VOICES];
@@ -369,12 +485,37 @@ static uint32_t fog_color_for_game(const GameState *game)
     return fog_color();
 }
 
-static double fog_amount(double distance)
+static void build_fog_luts(void)
+{
+    for (int i = 0; i <= FOG_LUT_SIZE; ++i) {
+        double d = (FOG_LUT_MAX_DISTANCE * i) / FOG_LUT_SIZE;
+        fog_lut[i] = clamp01(1.0 - exp(-d * FOG_DENSITY));
+        forest_fog_lut[i] = clamp01(1.0 - exp(-d * 0.220));
+    }
+    fog_lut_ready = 1;
+}
+
+static double fog_amount_from_lut(double distance, const double *lut)
 {
     if (distance <= 0.0) {
         return 0.0;
     }
-    return clamp01(1.0 - exp(-distance * FOG_DENSITY));
+    if (!fog_lut_ready) {
+        build_fog_luts();
+    }
+    if (distance >= FOG_LUT_MAX_DISTANCE) {
+        return 1.0;
+    }
+
+    double scaled = distance * (FOG_LUT_SIZE / FOG_LUT_MAX_DISTANCE);
+    int idx = (int)scaled;
+    double t = scaled - idx;
+    return lut[idx] + (lut[idx + 1] - lut[idx]) * t;
+}
+
+static double fog_amount(double distance)
+{
+    return fog_amount_from_lut(distance, fog_lut);
 }
 
 static double fog_amount_for_game(const GameState *game, double distance)
@@ -382,10 +523,7 @@ static double fog_amount_for_game(const GameState *game, double distance)
     if (!game || game->generator_mode != GENERATOR_FOREST) {
         return fog_amount(distance);
     }
-    if (distance <= 0.0) {
-        return 0.0;
-    }
-    return clamp01(1.0 - exp(-distance * 0.220));
+    return fog_amount_from_lut(distance, forest_fog_lut);
 }
 
 static uint32_t apply_fog(uint32_t color, double distance, double strength)
@@ -404,6 +542,57 @@ static double luminance(uint32_t color)
     double g = (double)((color >> 8) & 0xFFu);
     double b = (double)(color & 0xFFu);
     return (r * 0.2126 + g * 0.7152 + b * 0.0722) / 255.0;
+}
+
+static uint32_t add_color(uint32_t color, uint32_t add, double amount);
+
+static double pow5(double v)
+{
+    double v2 = v * v;
+    return v2 * v2 * v;
+}
+
+static double texture_bump_light(int tex_idx, int tex_x, int tex_y)
+{
+    return texture_bump[tex_idx][tex_y * TEX_SIZE + tex_x];
+}
+
+static uint32_t apply_fast_material(uint32_t albedo, double diffuse_light, double direct_light)
+{
+    return shade(albedo, diffuse_light + direct_light * 0.18);
+}
+
+static uint32_t apply_pbr_material(uint32_t albedo, const Material *material, double diffuse_light, double direct_light, double bump_light, double fresnel, double bright_texel, double wetness_boost, uint32_t light_tint)
+{
+    double wetness = clamp01(material->wetness + wetness_boost);
+    double roughness = material->roughness - wetness * 0.42;
+    if (roughness < 0.08) {
+        roughness = 0.08;
+    }
+    roughness = clamp01(roughness);
+
+    double metallic = clamp01(material->metallic);
+    double normal = 0.72 + bump_light * material->normal_strength;
+    double diffuse = diffuse_light * normal * (1.0 - metallic * 0.55) * (1.0 - wetness * 0.16);
+    uint32_t lit = shade(albedo, diffuse);
+
+    double gloss = 1.0 - roughness;
+    double wet_sheen = wetness * wetness * 0.58;
+    double specular = direct_light * (0.035 + gloss * gloss * 0.46 + metallic * 0.40 + wet_sheen);
+    specular *= 0.45 + bump_light * 0.75;
+    specular *= 0.70 + fresnel * 0.85;
+    specular *= 0.58 + bright_texel * 0.42;
+
+    uint32_t highlight = mix_color(rgb(242, 242, 232), light_tint, 0.58);
+    highlight = mix_color(highlight, albedo, metallic * 0.72);
+    lit = add_color(lit, highlight, specular);
+
+    if (wetness > 0.0) {
+        uint32_t wet_tint = mix_color(albedo, rgb(18, 24, 24), 0.34);
+        lit = mix_color(lit, wet_tint, wetness * 0.10);
+    }
+
+    return lit;
 }
 
 static uint32_t add_color(uint32_t color, uint32_t add, double amount)
@@ -725,6 +914,38 @@ static int load_texture_atlas(const char *path)
     return 1;
 }
 
+static void build_texture_luts(void)
+{
+    for (int tex = 0; tex < TEX_COUNT; ++tex) {
+        for (int y = 0; y < TEX_SIZE; ++y) {
+            for (int x = 0; x < TEX_SIZE; ++x) {
+                int idx = y * TEX_SIZE + x;
+                texture_luma[tex][idx] = luminance(textures[tex][idx]);
+            }
+        }
+        for (int y = 0; y < TEX_SIZE; ++y) {
+            int uy = (y - 1) & (TEX_SIZE - 1);
+            int dy = (y + 1) & (TEX_SIZE - 1);
+            for (int x = 0; x < TEX_SIZE; ++x) {
+                int lx = (x - 1) & (TEX_SIZE - 1);
+                int rx = (x + 1) & (TEX_SIZE - 1);
+                int idx = y * TEX_SIZE + x;
+                double h = texture_luma[tex][idx];
+                double h_l = texture_luma[tex][y * TEX_SIZE + lx];
+                double h_r = texture_luma[tex][y * TEX_SIZE + rx];
+                double h_u = texture_luma[tex][uy * TEX_SIZE + x];
+                double h_d = texture_luma[tex][dy * TEX_SIZE + x];
+                double edge = fabs(h_r - h_l) + fabs(h_d - h_u);
+                double local = h - (h_l + h_r + h_u + h_d) * 0.25;
+                texture_bump[tex][idx] = clamp01(0.50 + local * 1.55 + edge * 0.34);
+                texture_bright[tex][idx] = smooth01((h - 0.24) / 0.62);
+                texture_grad_x[tex][idx] = h_r - h_l;
+                texture_grad_y[tex][idx] = h_d - h_u;
+            }
+        }
+    }
+}
+
 static int load_monster_atlas(const char *path)
 {
     FILE *f = fopen(path, "rb");
@@ -888,12 +1109,225 @@ static int load_relic_atlas(const char *path)
     return 1;
 }
 
+static int load_item_atlas(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return 0;
+    }
+
+    char magic[3] = {0};
+    int width = 0;
+    int height = 0;
+    int max_value = 0;
+    int ok = fread(magic, 1, 2, f) == 2 &&
+             strcmp(magic, "P6") == 0 &&
+             ppm_next_int(f, &width) &&
+             ppm_next_int(f, &height) &&
+             ppm_next_int(f, &max_value) &&
+             width == PROJECTILE_SIZE * ITEM_SPRITE_COUNT &&
+             height == PROJECTILE_SIZE &&
+             max_value == 255;
+
+    int sep = fgetc(f);
+    if (!isspace(sep)) {
+        ok = 0;
+    }
+
+    size_t pixel_count = (size_t)width * (size_t)height;
+    uint8_t *pixels = ok ? malloc(pixel_count * 3) : NULL;
+    if (!pixels) {
+        fclose(f);
+        return 0;
+    }
+
+    ok = fread(pixels, 3, pixel_count, f) == pixel_count;
+    fclose(f);
+    if (!ok) {
+        free(pixels);
+        return 0;
+    }
+
+    for (int sprite = 0; sprite < ITEM_SPRITE_COUNT; ++sprite) {
+        int sprite_x = sprite * PROJECTILE_SIZE;
+        for (int y = 0; y < PROJECTILE_SIZE; ++y) {
+            for (int x = 0; x < PROJECTILE_SIZE; ++x) {
+                size_t src = ((size_t)y * (size_t)width + (size_t)(sprite_x + x)) * 3;
+                item_sprites[sprite][y * PROJECTILE_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
+            }
+        }
+    }
+
+    free(pixels);
+    return 1;
+}
+
+static int load_weapon_atlas(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return 0;
+    }
+
+    char magic[3] = {0};
+    int width = 0;
+    int height = 0;
+    int max_value = 0;
+    int ok = fread(magic, 1, 2, f) == 2 &&
+             strcmp(magic, "P6") == 0 &&
+             ppm_next_int(f, &width) &&
+             ppm_next_int(f, &height) &&
+             ppm_next_int(f, &max_value) &&
+             width == WEAPON_SPRITE_SIZE * WEAPON_SPRITE_COUNT &&
+             height == WEAPON_SPRITE_SIZE &&
+             max_value == 255;
+
+    int sep = fgetc(f);
+    if (!isspace(sep)) {
+        ok = 0;
+    }
+
+    size_t pixel_count = (size_t)width * (size_t)height;
+    uint8_t *pixels = ok ? malloc(pixel_count * 3) : NULL;
+    if (!pixels) {
+        fclose(f);
+        return 0;
+    }
+
+    ok = fread(pixels, 3, pixel_count, f) == pixel_count;
+    fclose(f);
+    if (!ok) {
+        free(pixels);
+        return 0;
+    }
+
+    for (int sprite = 0; sprite < WEAPON_SPRITE_COUNT; ++sprite) {
+        int sprite_x = sprite * WEAPON_SPRITE_SIZE;
+        for (int y = 0; y < WEAPON_SPRITE_SIZE; ++y) {
+            for (int x = 0; x < WEAPON_SPRITE_SIZE; ++x) {
+                size_t src = ((size_t)y * (size_t)width + (size_t)(sprite_x + x)) * 3;
+                weapon_sprites[sprite][y * WEAPON_SPRITE_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
+            }
+        }
+    }
+
+    free(pixels);
+    return 1;
+}
+
+static int load_decal_atlas(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return 0;
+    }
+
+    char magic[3] = {0};
+    int width = 0;
+    int height = 0;
+    int max_value = 0;
+    int ok = fread(magic, 1, 2, f) == 2 &&
+             strcmp(magic, "P6") == 0 &&
+             ppm_next_int(f, &width) &&
+             ppm_next_int(f, &height) &&
+             ppm_next_int(f, &max_value) &&
+             width == DECAL_SIZE * DECAL_COUNT &&
+             height == DECAL_SIZE &&
+             max_value == 255;
+
+    int sep = fgetc(f);
+    if (!isspace(sep)) {
+        ok = 0;
+    }
+
+    size_t pixel_count = (size_t)width * (size_t)height;
+    uint8_t *pixels = ok ? malloc(pixel_count * 3) : NULL;
+    if (!pixels) {
+        fclose(f);
+        return 0;
+    }
+
+    ok = fread(pixels, 3, pixel_count, f) == pixel_count;
+    fclose(f);
+    if (!ok) {
+        free(pixels);
+        return 0;
+    }
+
+    for (int decal = 0; decal < DECAL_COUNT; ++decal) {
+        int decal_x = decal * DECAL_SIZE;
+        for (int y = 0; y < DECAL_SIZE; ++y) {
+            for (int x = 0; x < DECAL_SIZE; ++x) {
+                size_t src = ((size_t)y * (size_t)width + (size_t)(decal_x + x)) * 3;
+                decal_sprites[decal][y * DECAL_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
+            }
+        }
+    }
+
+    free(pixels);
+    return 1;
+}
+
+static int load_wall_decal_atlas(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return 0;
+    }
+
+    char magic[3] = {0};
+    int width = 0;
+    int height = 0;
+    int max_value = 0;
+    int ok = fread(magic, 1, 2, f) == 2 &&
+             strcmp(magic, "P6") == 0 &&
+             ppm_next_int(f, &width) &&
+             ppm_next_int(f, &height) &&
+             ppm_next_int(f, &max_value) &&
+             width == WALL_DECAL_SIZE * WALL_DECAL_COUNT &&
+             height == WALL_DECAL_SIZE &&
+             max_value == 255;
+
+    int sep = fgetc(f);
+    if (!isspace(sep)) {
+        ok = 0;
+    }
+
+    size_t pixel_count = (size_t)width * (size_t)height;
+    uint8_t *pixels = ok ? malloc(pixel_count * 3) : NULL;
+    if (!pixels) {
+        fclose(f);
+        return 0;
+    }
+
+    ok = fread(pixels, 3, pixel_count, f) == pixel_count;
+    fclose(f);
+    if (!ok) {
+        free(pixels);
+        return 0;
+    }
+
+    for (int decal = 0; decal < WALL_DECAL_COUNT; ++decal) {
+        int decal_x = decal * WALL_DECAL_SIZE;
+        for (int y = 0; y < WALL_DECAL_SIZE; ++y) {
+            for (int x = 0; x < WALL_DECAL_SIZE; ++x) {
+                size_t src = ((size_t)y * (size_t)width + (size_t)(decal_x + x)) * 3;
+                wall_decal_sprites[decal][y * WALL_DECAL_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
+            }
+        }
+    }
+
+    free(pixels);
+    return 1;
+}
+
 static int init_assets(void)
 {
     if (!load_texture_atlas(TEXTURE_ATLAS_PATH)) {
         fprintf(stderr, "error: cannot load required texture atlas %s\n", TEXTURE_ATLAS_PATH);
         return 0;
     }
+    build_texture_luts();
     if (!load_monster_atlas(MONSTER_ATLAS_PATH)) {
         fprintf(stderr, "error: cannot load required monster atlas %s\n", MONSTER_ATLAS_PATH);
         return 0;
@@ -904,6 +1338,22 @@ static int init_assets(void)
     }
     if (!load_relic_atlas(RELIC_ATLAS_PATH)) {
         fprintf(stderr, "error: cannot load required relic atlas %s\n", RELIC_ATLAS_PATH);
+        return 0;
+    }
+    if (!load_item_atlas(ITEM_ATLAS_PATH)) {
+        fprintf(stderr, "error: cannot load required item atlas %s\n", ITEM_ATLAS_PATH);
+        return 0;
+    }
+    if (!load_weapon_atlas(WEAPON_ATLAS_PATH)) {
+        fprintf(stderr, "error: cannot load required weapon atlas %s\n", WEAPON_ATLAS_PATH);
+        return 0;
+    }
+    if (!load_decal_atlas(DECAL_ATLAS_PATH)) {
+        fprintf(stderr, "error: cannot load required decal atlas %s\n", DECAL_ATLAS_PATH);
+        return 0;
+    }
+    if (!load_wall_decal_atlas(WALL_DECAL_ATLAS_PATH)) {
+        fprintf(stderr, "error: cannot load required wall decal atlas %s\n", WALL_DECAL_ATLAS_PATH);
         return 0;
     }
     return 1;
@@ -977,12 +1427,6 @@ static double player_torch_light_at(const Camera *cam, const GameState *game, do
     return clamp01(flicker * (0.48 + forward * 0.20) * fade / (1.0 + dist2 * 0.34));
 }
 
-static uint32_t apply_torch_light(uint32_t color, double base_light, double torch_light, double tint)
-{
-    uint32_t lit = shade(color, base_light + torch_light);
-    return mix_color(lit, rgb(255, 132, 48), clamp01(torch_light * tint));
-}
-
 static double forest_moon_visibility_at(double x, double y)
 {
     const double moon_x = 0.88;
@@ -1001,34 +1445,36 @@ static double forest_moon_visibility_at(double x, double y)
     return clamp01(visibility);
 }
 
-static double wall_bump_light(int tex_idx, int tex_x, int tex_y, double hit_x, double hit_y)
+static void wall_bump_light_vector(double hit_x, double hit_y, double *light_x, double *light_y)
 {
-    int lx = (tex_x - 1) & (TEX_SIZE - 1);
-    int rx = (tex_x + 1) & (TEX_SIZE - 1);
-    int uy = (tex_y - 1) & (TEX_SIZE - 1);
-    int dy = (tex_y + 1) & (TEX_SIZE - 1);
-    double h_l = luminance(textures[tex_idx][tex_y * TEX_SIZE + lx]);
-    double h_r = luminance(textures[tex_idx][tex_y * TEX_SIZE + rx]);
-    double h_u = luminance(textures[tex_idx][uy * TEX_SIZE + tex_x]);
-    double h_d = luminance(textures[tex_idx][dy * TEX_SIZE + tex_x]);
-    double gx = h_r - h_l;
-    double gy = h_d - h_u;
-    double light_dir = 0.0;
+    double lx = 0.0;
+    double ly = 0.0;
 
     for (int i = 0; i < MAX_TORCHES; ++i) {
         double dx = torches[i].pos.x - hit_x;
         double dyw = torches[i].pos.y - hit_y;
         double dist2 = dx * dx + dyw * dyw;
         if (dist2 < 12.0) {
-            light_dir += (gx * dx + gy * dyw) / (1.0 + dist2);
+            double weight = 1.0 / (1.0 + dist2);
+            lx += dx * weight;
+            ly += dyw * weight;
         }
     }
 
+    *light_x = lx;
+    *light_y = ly;
+}
+
+static double wall_bump_light(int tex_idx, int tex_x, int tex_y, double light_x, double light_y)
+{
+    int idx = tex_y * TEX_SIZE + tex_x;
+    double light_dir = texture_grad_x[tex_idx][idx] * light_x + texture_grad_y[tex_idx][idx] * light_y;
     return clamp01(0.5 + light_dir * 2.8);
 }
 
 static void render_floor_ceiling(const Camera *cam, const GameState *game)
 {
+    int fast_render = render_quality == RENDER_QUALITY_FAST;
     const int floor_tex = game->generator_mode == GENERATOR_FOREST ? 5 : 6;
     const int ceil_tex = game->generator_mode == GENERATOR_FOREST ? 4 : 3;
     double ray_dir_x0 = cam->dir.x - cam->plane.x;
@@ -1057,20 +1503,62 @@ static void render_floor_ceiling(const Camera *cam, const GameState *game)
         double light = game->generator_mode == GENERATOR_FOREST
             ? 0.125 + 0.42 / (1.0 + row_distance * 0.14)
             : 0.045 + 0.30 / (1.0 + row_distance * 0.17);
+        double view_facing = fast_render ? 1.0 : clamp01(0.18 + 6.0 / (row_distance + 6.0));
+        double fresnel = fast_render ? 0.0 : pow5(1.0 - view_facing);
+        double floor_base = light * (game->generator_mode == GENERATOR_FOREST ? 0.86 : 0.48);
+        double ceil_base = light * (game->generator_mode == GENERATOR_FOREST ? 0.44 : 0.18);
+        uint32_t floor_tint = game->generator_mode == GENERATOR_FOREST ? rgb(132, 154, 142) : rgb(255, 132, 48);
+        uint32_t torch_tint = rgb(255, 132, 48);
 
         for (int x = 0; x < SCREEN_W; ++x) {
             int cell_x = (int)floor(floor_x);
             int cell_y = (int)floor(floor_y);
             int tx = (int)(TEX_SIZE * (floor_x - cell_x)) & (TEX_SIZE - 1);
             int ty = (int)(TEX_SIZE * (floor_y - cell_y)) & (TEX_SIZE - 1);
+            int texel_idx = ty * TEX_SIZE + tx;
 
-            uint32_t floor_color = textures[floor_tex][ty * TEX_SIZE + tx];
-            uint32_t ceil_color = textures[ceil_tex][ty * TEX_SIZE + tx];
+            uint32_t floor_color = textures[floor_tex][texel_idx];
+            uint32_t ceil_color = textures[ceil_tex][texel_idx];
             double player_light = player_torch_light_at(cam, game, floor_x, floor_y);
             double torch_light = clamp01(torch_light_at(floor_x, floor_y, game->time) + player_light);
             double moon_light = game->generator_mode == GENERATOR_FOREST ? forest_moon_visibility_at(floor_x, floor_y) : 0.0;
-            uint32_t lit_floor = apply_torch_light(floor_color, light * (game->generator_mode == GENERATOR_FOREST ? 0.86 : 0.48), torch_light * 0.70, 0.26);
-            uint32_t lit_ceil = apply_torch_light(ceil_color, light * (game->generator_mode == GENERATOR_FOREST ? 0.44 : 0.18), torch_light * 0.26, 0.10);
+            uint32_t lit_floor;
+            uint32_t lit_ceil;
+            if (fast_render) {
+                lit_floor = apply_fast_material(
+                    floor_color,
+                    floor_base + torch_light * 0.70 + moon_light * 0.08,
+                    torch_light * 0.76 + moon_light * 0.16);
+                lit_ceil = apply_fast_material(
+                    ceil_color,
+                    ceil_base + torch_light * 0.26 + moon_light * 0.05,
+                    torch_light * 0.26 + moon_light * 0.08);
+            } else {
+                double floor_bump = texture_bump_light(floor_tex, tx, ty);
+                double ceil_bump = texture_bump_light(ceil_tex, tx, ty);
+                lit_floor = apply_pbr_material(
+                    floor_color,
+                    &texture_materials[floor_tex],
+                    floor_base + torch_light * 0.70 + moon_light * 0.08,
+                    torch_light * 0.76 + moon_light * 0.16,
+                    floor_bump,
+                    fresnel,
+                    texture_bright[floor_tex][texel_idx],
+                    game->generator_mode == GENERATOR_FOREST ? 0.10 : 0.02,
+                    floor_tint);
+                lit_ceil = apply_pbr_material(
+                    ceil_color,
+                    &texture_materials[ceil_tex],
+                    ceil_base + torch_light * 0.26 + moon_light * 0.05,
+                    torch_light * 0.26 + moon_light * 0.08,
+                    ceil_bump,
+                    fresnel,
+                    texture_bright[ceil_tex][texel_idx],
+                    0.0,
+                    floor_tint);
+            }
+            lit_floor = mix_color(lit_floor, torch_tint, clamp01(torch_light * 0.10));
+            lit_ceil = mix_color(lit_ceil, torch_tint, clamp01(torch_light * 0.04));
             if (game->generator_mode == GENERATOR_FOREST) {
                 lit_floor = mix_color(lit_floor, rgb(118, 150, 136), moon_light * 0.18);
                 lit_ceil = mix_color(lit_ceil, rgb(54, 78, 74), 0.28);
@@ -1194,6 +1682,16 @@ static int project_sprite(const Camera *cam, Vec2 pos, double scale, int *screen
     return *screen_h > 0;
 }
 
+static void grounded_sprite_bounds(int sprite_h, double scale, int *raw_start_y, int *raw_end_y)
+{
+    int base_h = (int)(sprite_h / scale);
+    if (base_h < 1) {
+        base_h = 1;
+    }
+    *raw_end_y = SCREEN_H / 2 + base_h / 2;
+    *raw_start_y = *raw_end_y - sprite_h;
+}
+
 static void render_monster(const Camera *cam, const Monster *monster)
 {
     if (!monster->active) {
@@ -1203,15 +1701,18 @@ static void render_monster(const Camera *cam, const Monster *monster)
     int sprite_screen_x;
     int sprite_h;
     double depth;
-    double monster_scale = monster->is_boss ? 2.20 : 1.0;
+    double monster_scale = monster->is_boss ? 2.20 : (monster->type == MONSTER_FLYING_HEAD ? 1.42 : 1.0);
     if (!project_sprite(cam, monster->pos, monster_scale, &sprite_screen_x, &sprite_h, &depth)) {
         return;
     }
 
     int sprite_w = sprite_h;
 
-    int raw_start_y = -sprite_h / 2 + SCREEN_H / 2;
-    int raw_end_y = sprite_h / 2 + SCREEN_H / 2;
+    int hover = monster->type == MONSTER_FLYING_HEAD
+        ? (int)(sprite_h * 0.18 + sin((active_game ? active_game->time : 0.0) * 4.8 + monster->route) * 3.0)
+        : 0;
+    int raw_start_y = -sprite_h / 2 + SCREEN_H / 2 - hover;
+    int raw_end_y = sprite_h / 2 + SCREEN_H / 2 - hover;
     int draw_start_y = raw_start_y;
     int draw_end_y = raw_end_y;
     int draw_start_x = -sprite_w / 2 + sprite_screen_x;
@@ -1260,42 +1761,19 @@ static void render_monster(const Camera *cam, const Monster *monster)
 
 static uint32_t projectile_texel(const Projectile *projectile, int tex_x, int tex_y)
 {
-    double dx = (tex_x + 0.5) - PROJECTILE_SIZE / 2.0;
-    double dy = (tex_y + 0.5) - PROJECTILE_SIZE / 2.0;
-    double dist = sqrt(dx * dx + dy * dy);
-
+    uint32_t color;
     if (projectile->type == PROJECTILE_EXPLOSION) {
-        double ring = PROJECTILE_SIZE * (0.22 + projectile->life * 0.85);
-        if (dist > PROJECTILE_SIZE * 0.50 || dist < ring * 0.30) {
-            return 0;
-        }
-        if (((tex_x * 5 + tex_y * 3) & 7) < 3) {
-            return rgb(255, 188, 66);
-        }
-        return dist < ring ? rgb(255, 106, 28) : rgb(126, 42, 20);
-    }
-
-    if (dist > PROJECTILE_SIZE * 0.48) {
-        return 0;
+        color = item_sprites[ITEM_SPRITE_EXPLOSION][tex_y * PROJECTILE_SIZE + tex_x];
+        return is_sprite_key(color) ? 0 : color;
     }
 
     if (projectile->type == PROJECTILE_PLAYER_FIREBALL) {
-        if (dist < PROJECTILE_SIZE * 0.20) {
-            return rgb(255, 246, 156);
-        }
-        if (((tex_x * 13 + tex_y * 9) & 15) < 7) {
-            return rgb(255, 142, 34);
-        }
-        return rgb(198, 52, 22);
+        color = item_sprites[ITEM_SPRITE_FIREBALL][tex_y * PROJECTILE_SIZE + tex_x];
+        return is_sprite_key(color) ? 0 : color;
     }
 
-    if (dist < PROJECTILE_SIZE * 0.18) {
-        return rgb(255, 248, 132);
-    }
-    if (((tex_x * 7 + tex_y * 11) & 15) < 5) {
-        return rgb(255, 84, 24);
-    }
-    return rgb(196, 28, 18);
+    color = item_sprites[ITEM_SPRITE_BOLT][tex_y * PROJECTILE_SIZE + tex_x];
+    return is_sprite_key(color) ? 0 : color;
 }
 
 static void render_projectile(const Camera *cam, const Projectile *projectile)
@@ -1310,8 +1788,9 @@ static void render_projectile(const Camera *cam, const Projectile *projectile)
     }
 
     int sprite_w = sprite_h;
-    int raw_start_y = -sprite_h / 2 + SCREEN_H / 2;
-    int raw_end_y = sprite_h / 2 + SCREEN_H / 2;
+    int raw_start_y;
+    int raw_end_y;
+    grounded_sprite_bounds(sprite_h, scale, &raw_start_y, &raw_end_y);
     int draw_start_y = raw_start_y;
     int draw_end_y = raw_end_y;
     int draw_start_x = -sprite_w / 2 + sprite_screen_x;
@@ -1356,6 +1835,23 @@ static void render_projectile(const Camera *cam, const Projectile *projectile)
     }
 }
 
+static int item_sprite_for_type(const Item *item)
+{
+    switch (item->type) {
+    case ITEM_HEALTH: return ITEM_SPRITE_HEALTH;
+    case ITEM_AMMO: return ITEM_SPRITE_AMMO;
+    case ITEM_RAPID: return ITEM_SPRITE_RAPID;
+    case ITEM_DAMAGE: return ITEM_SPRITE_DAMAGE;
+    case ITEM_FIREBALL: return ITEM_SPRITE_FIREBALL;
+    case ITEM_PISTOL: return ITEM_SPRITE_PISTOL;
+    case ITEM_KEY: return ITEM_SPRITE_KEY;
+    case ITEM_GOLD: return ITEM_SPRITE_GOLD;
+    case ITEM_SHRINE: return ITEM_SPRITE_SHRINE;
+    case ITEM_BONEPILE: return ITEM_SPRITE_BONEPILE;
+    default: return ITEM_SPRITE_KEY;
+    }
+}
+
 static uint32_t item_texel(const Item *item, int tex_x, int tex_y)
 {
     if (item->type == ITEM_RELIC) {
@@ -1367,64 +1863,8 @@ static uint32_t item_texel(const Item *item, int tex_x, int tex_y)
         return is_sprite_key(color) ? 0 : color;
     }
 
-    double dx = (tex_x + 0.5) - PROJECTILE_SIZE / 2.0;
-    double dy = (tex_y + 0.5) - PROJECTILE_SIZE / 2.0;
-    double dist = sqrt(dx * dx + dy * dy);
-    int border = dist > PROJECTILE_SIZE * 0.43;
-
-    if (dist > PROJECTILE_SIZE * 0.48) {
-        return 0;
-    }
-
-    switch (item->type) {
-    case ITEM_HEALTH:
-        if (abs(tex_x - PROJECTILE_SIZE / 2) < 4 || abs(tex_y - PROJECTILE_SIZE / 2) < 4) {
-            return rgb(245, 236, 218);
-        }
-        return border ? rgb(94, 12, 18) : rgb(192, 24, 34);
-    case ITEM_AMMO:
-        if ((tex_x / 4) & 1) {
-            return rgb(234, 192, 74);
-        }
-        return border ? rgb(92, 54, 22) : rgb(166, 112, 38);
-    case ITEM_RAPID:
-        if (((tex_x + tex_y) & 7) < 3) {
-            return rgb(136, 232, 255);
-        }
-        return border ? rgb(20, 62, 94) : rgb(42, 152, 210);
-    case ITEM_DAMAGE:
-        if (dist < PROJECTILE_SIZE * 0.18) {
-            return rgb(255, 244, 160);
-        }
-        return border ? rgb(86, 20, 104) : rgb(186, 64, 230);
-    case ITEM_FIREBALL:
-        if (dist < PROJECTILE_SIZE * 0.18 || ((tex_x + tex_y) & 7) == 0) {
-            return rgb(255, 228, 118);
-        }
-        return border ? rgb(88, 28, 16) : rgb(230, 82, 24);
-    case ITEM_PISTOL:
-        if (tex_y > 13 && tex_y < 19 && tex_x > 6 && tex_x < 25) {
-            return tex_y < 16 ? rgb(150, 154, 154) : rgb(56, 58, 60);
-        }
-        if (tex_x > 18 && tex_x < 23 && tex_y > 18 && tex_y < 27) {
-            return rgb(104, 66, 38);
-        }
-        if (tex_x > 5 && tex_x < 10 && tex_y > 15 && tex_y < 20) {
-            return rgb(34, 35, 38);
-        }
-        return border ? rgb(50, 42, 34) : rgb(92, 82, 66);
-    default:
-        if (tex_y > 12 && tex_y < 18 && tex_x > 8 && tex_x < 24) {
-            return rgb(238, 202, 86);
-        }
-        if (tex_x > 18 && tex_x < 22 && tex_y > 16 && tex_y < 27) {
-            return rgb(180, 128, 42);
-        }
-        if (dist < PROJECTILE_SIZE * 0.18) {
-            return rgb(255, 232, 128);
-        }
-        return border ? rgb(88, 64, 24) : rgb(210, 164, 58);
-    }
+    uint32_t color = item_sprites[item_sprite_for_type(item)][tex_y * PROJECTILE_SIZE + tex_x];
+    return is_sprite_key(color) ? 0 : color;
 }
 
 static void render_item(const Camera *cam, const Item *item)
@@ -1432,14 +1872,18 @@ static void render_item(const Camera *cam, const Item *item)
     int sprite_screen_x;
     int sprite_h;
     double depth;
-    double scale = item->type == ITEM_RELIC ? 0.54 : 0.42;
+    double scale = item->type == ITEM_RELIC ? 0.54 :
+        (item->type == ITEM_SHRINE ? 0.62 :
+         (item->type == ITEM_BONEPILE ? 0.48 :
+          (item->type == ITEM_GOLD ? 0.34 : 0.42)));
     if (!project_sprite(cam, item->pos, scale, &sprite_screen_x, &sprite_h, &depth)) {
         return;
     }
 
     int sprite_w = sprite_h;
-    int raw_start_y = -sprite_h / 2 + SCREEN_H / 2;
-    int raw_end_y = sprite_h / 2 + SCREEN_H / 2;
+    int raw_start_y;
+    int raw_end_y;
+    grounded_sprite_bounds(sprite_h, scale, &raw_start_y, &raw_end_y);
     int draw_start_y = raw_start_y;
     int draw_end_y = raw_end_y;
     int draw_start_x = -sprite_w / 2 + sprite_screen_x;
@@ -1450,7 +1894,8 @@ static void render_item(const Camera *cam, const Item *item)
     if (draw_start_x < 0) draw_start_x = 0;
     if (draw_end_x >= SCREEN_W) draw_end_x = SCREEN_W - 1;
 
-    double light = (item->type == ITEM_RELIC ? 1.55 : 1.2) / (1.0 + depth * 0.045);
+    double light = (item->type == ITEM_RELIC || item->type == ITEM_SHRINE ? 1.55 :
+        (item->type == ITEM_GOLD ? 1.35 : 1.2)) / (1.0 + depth * 0.045);
     for (int stripe = draw_start_x; stripe <= draw_end_x; ++stripe) {
         if (depth >= z_buffer[stripe]) {
             continue;
@@ -1472,9 +1917,12 @@ static void render_item(const Camera *cam, const Item *item)
             if (color != 0) {
                 framebuffer[y * SCREEN_W + stripe] = apply_fog(shade(color, light), depth, 0.72);
                 depth_buffer[y * SCREEN_W + stripe] = depth;
-                if (item->type == ITEM_FIREBALL || item->type == ITEM_RAPID || item->type == ITEM_DAMAGE || item->type == ITEM_RELIC) {
-                    add_glow(stripe, y, item->type == ITEM_RELIC ? 0.74 : (item->type == ITEM_FIREBALL ? 0.22 : 0.12));
-                    if (item->type == ITEM_RELIC) {
+                if (item->type == ITEM_FIREBALL || item->type == ITEM_RAPID || item->type == ITEM_DAMAGE || item->type == ITEM_RELIC || item->type == ITEM_SHRINE || item->type == ITEM_GOLD) {
+                    add_glow(stripe, y, item->type == ITEM_RELIC ? 0.74 :
+                             (item->type == ITEM_SHRINE ? 0.30 :
+                              (item->type == ITEM_GOLD ? 0.16 :
+                               (item->type == ITEM_FIREBALL ? 0.22 : 0.12))));
+                    if (item->type == ITEM_RELIC || item->type == ITEM_SHRINE) {
                         add_light(stripe, y, 0.36);
                     }
                 }
@@ -1485,41 +1933,15 @@ static void render_item(const Camera *cam, const Item *item)
 
 static uint32_t portal_texel(const Portal *portal, int tex_x, int tex_y)
 {
-    double dx = tex_x - PROJECTILE_SIZE / 2.0;
-    double dy = tex_y - PROJECTILE_SIZE / 2.0;
-    double dist = sqrt(dx * dx + dy * dy);
-    int arch = dist < PROJECTILE_SIZE * 0.45 && tex_y > 5 && tex_y < 29;
-    int hollow = dist < PROJECTILE_SIZE * 0.28 && tex_y > 9 && tex_y < 29;
     int boss_open = portal->boss_gate && active_game && active_game->boss_unlocked;
-
-    if (!arch) {
-        return 0;
-    }
-    if (hollow) {
-        if (((tex_x * 7 + tex_y * 11) & 15) < 3) {
-            if (portal->boss_gate) {
-                return boss_open ? rgb(190, 72, 42) : rgb(66, 34, 82);
-            }
-            return portal->exit_to_forest ? rgb(92, 170, 190) : rgb(28, 50, 32);
-        }
-        if (portal->boss_gate) {
-            return boss_open ? rgb(46, 10, 8) : rgb(12, 8, 18);
-        }
-        return portal->exit_to_forest ? rgb(10, 28, 38) : rgb(8, 12, 9);
-    }
+    int sprite = ITEM_SPRITE_PORTAL_DUNGEON;
     if (portal->boss_gate) {
-        if (boss_open) {
-            return ((tex_x + tex_y) & 3) ? rgb(114, 36, 28) : rgb(236, 116, 48);
-        }
-        return ((tex_x + tex_y) & 3) ? rgb(48, 36, 54) : rgb(88, 58, 108);
+        sprite = boss_open ? ITEM_SPRITE_PORTAL_BOSS_OPEN : ITEM_SPRITE_PORTAL_BOSS_LOCKED;
+    } else if (portal->exit_to_forest) {
+        sprite = ITEM_SPRITE_PORTAL_FOREST;
     }
-    if (portal->exit_to_forest) {
-        return ((tex_x + tex_y) & 3) ? rgb(46, 98, 110) : rgb(116, 190, 190);
-    }
-    if ((tex_x + tex_y) & 3) {
-        return rgb(58, 48, 38);
-    }
-    return rgb(28, 78, 38);
+    uint32_t color = item_sprites[sprite][tex_y * PROJECTILE_SIZE + tex_x];
+    return is_sprite_key(color) ? 0 : color;
 }
 
 static void render_portal(const Camera *cam, const Portal *portal)
@@ -1528,13 +1950,15 @@ static void render_portal(const Camera *cam, const Portal *portal)
     int sprite_h;
     double depth;
     Vec2 pos = {portal->x + 0.5, portal->y + 0.5};
-    if (!project_sprite(cam, pos, 0.70, &sprite_screen_x, &sprite_h, &depth)) {
+    double scale = 0.70;
+    if (!project_sprite(cam, pos, scale, &sprite_screen_x, &sprite_h, &depth)) {
         return;
     }
 
     int sprite_w = sprite_h;
-    int raw_start_y = -sprite_h / 2 + SCREEN_H / 2;
-    int raw_end_y = sprite_h / 2 + SCREEN_H / 2;
+    int raw_start_y;
+    int raw_end_y;
+    grounded_sprite_bounds(sprite_h, scale, &raw_start_y, &raw_end_y);
     int draw_start_y = raw_start_y;
     int draw_end_y = raw_end_y;
     int draw_start_x = -sprite_w / 2 + sprite_screen_x;
@@ -1708,8 +2132,9 @@ static void render_torch(const Camera *cam, const Torch *torch, int index, doubl
         return;
     }
 
-    int raw_start_y = forest_mode ? SCREEN_H / 2 - sprite_h / 2 : SCREEN_H / 2 - sprite_h * 3 / 4;
-    int raw_end_y = raw_start_y + sprite_h;
+    int raw_start_y;
+    int raw_end_y;
+    grounded_sprite_bounds(sprite_h, scale, &raw_start_y, &raw_end_y);
     int draw_start_y = raw_start_y;
     int draw_end_y = raw_end_y;
     int draw_start_x = -sprite_w / 2 + sprite_screen_x;
@@ -1994,19 +2419,6 @@ static void render_volumetric_fog(const Camera *cam, const GameState *game)
     }
 }
 
-static void render_light_buffer(void)
-{
-    for (int y = 0; y < SCREEN_H - 14; ++y) {
-        for (int x = 0; x < SCREEN_W; ++x) {
-            int idx = y * SCREEN_W + x;
-            double light = light_buffer[idx];
-            if (light > 0.002) {
-                framebuffer[idx] = mix_color(framebuffer[idx], rgb(255, 134, 48), clamp01(light * 0.18));
-            }
-        }
-    }
-}
-
 static void render_bloom(void)
 {
     for (int y = 1; y < SCREEN_H - 15; ++y) {
@@ -2046,14 +2458,36 @@ static void render_bloom(void)
     }
 }
 
-static void render_color_grade(const GameState *game)
+static void render_light_buffer(void)
 {
     for (int y = 0; y < SCREEN_H - 14; ++y) {
-        double ny = (y - SCREEN_H * 0.5) / (SCREEN_H * 0.5);
         for (int x = 0; x < SCREEN_W; ++x) {
             int idx = y * SCREEN_W + x;
-            double nx = (x - SCREEN_W * 0.5) / (SCREEN_W * 0.5);
-            double vignette = clamp01((nx * nx + ny * ny) * 0.34);
+            double light = light_buffer[idx];
+            if (light > 0.002) {
+                framebuffer[idx] = mix_color(framebuffer[idx], rgb(255, 134, 48), clamp01(light * 0.18));
+            }
+        }
+    }
+}
+
+static void render_color_grade(const GameState *game)
+{
+    if (!vignette_ready) {
+        for (int y = 0; y < SCREEN_H - 14; ++y) {
+            double ny = (y - SCREEN_H * 0.5) / (SCREEN_H * 0.5);
+            for (int x = 0; x < SCREEN_W; ++x) {
+                double nx = (x - SCREEN_W * 0.5) / (SCREEN_W * 0.5);
+                vignette_buffer[y * SCREEN_W + x] = clamp01((nx * nx + ny * ny) * 0.34);
+            }
+        }
+        vignette_ready = 1;
+    }
+
+    for (int y = 0; y < SCREEN_H - 14; ++y) {
+        for (int x = 0; x < SCREEN_W; ++x) {
+            int idx = y * SCREEN_W + x;
+            double vignette = vignette_buffer[idx];
             uint32_t c = framebuffer[idx];
             if (game->generator_mode == GENERATOR_FOREST) {
                 c = contrast_color(c, 1.08, 6.0);
@@ -2126,15 +2560,59 @@ static void draw_line(int x0, int y0, int x1, int y1, uint32_t color)
 
 static void render_shot_trace(const GameState *game)
 {
-    if (game->shot_trace <= 0.0) {
+    if (game->shot_trace <= 0.0 || game->selected_weapon != WEAPON_PISTOL) {
         return;
     }
 
-    double t = game->shot_trace / WEAPON_FLASH_TIME;
-    uint32_t core = mix_color(rgb(255, 120, 28), rgb(255, 245, 170), clamp01(t));
-    int jitter = (int)(sin(game->time * 80.0) * 2.0);
-    draw_line(SCREEN_W / 2 + 6, SCREEN_H - 41, SCREEN_W / 2 + jitter, SCREEN_H / 2 + 2, core);
-    draw_line(SCREEN_W / 2 + 7, SCREEN_H - 41, SCREEN_W / 2 + jitter + 1, SCREEN_H / 2 + 2, rgb(255, 210, 80));
+    double progress = 1.0 - clamp01(game->shot_trace / WEAPON_FLASH_TIME);
+    int muzzle_x = SCREEN_W / 2 + 31;
+    int muzzle_y = SCREEN_H - 66;
+    int target_x = SCREEN_W / 2;
+    int target_y = SCREEN_H / 2 + 2;
+    int bullet_x = muzzle_x + (int)((target_x - muzzle_x) * progress);
+    int bullet_y = muzzle_y + (int)((target_y - muzzle_y) * progress);
+    int tail_x = bullet_x + (int)((muzzle_x - target_x) * 0.08);
+    int tail_y = bullet_y + (int)((muzzle_y - target_y) * 0.08);
+    uint32_t core = mix_color(rgb(255, 132, 34), rgb(255, 244, 154), 0.70 + 0.30 * (1.0 - progress));
+
+    draw_line(tail_x, tail_y, bullet_x, bullet_y, rgb(198, 88, 28));
+    draw_line(tail_x + 1, tail_y, bullet_x + 1, bullet_y, core);
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            int px = bullet_x + x;
+            int py = bullet_y + y;
+            if (px >= 0 && px < SCREEN_W && py >= 0 && py < SCREEN_H) {
+                framebuffer[py * SCREEN_W + px] = x == 0 && y == 0 ? rgb(255, 250, 194) : core;
+                add_glow(px, py, 0.28);
+            }
+        }
+    }
+}
+
+static void draw_weapon_sprite(int sprite, int x, int y, int size)
+{
+    if (sprite < 0 || sprite >= WEAPON_SPRITE_COUNT || size <= 0) {
+        return;
+    }
+
+    for (int yy = 0; yy < size; ++yy) {
+        int sy = yy * WEAPON_SPRITE_SIZE / size;
+        int dst_y = y + yy;
+        if (dst_y < 0 || dst_y >= SCREEN_H) {
+            continue;
+        }
+        for (int xx = 0; xx < size; ++xx) {
+            int sx = xx * WEAPON_SPRITE_SIZE / size;
+            int dst_x = x + xx;
+            if (dst_x < 0 || dst_x >= SCREEN_W) {
+                continue;
+            }
+            uint32_t color = weapon_sprites[sprite][sy * WEAPON_SPRITE_SIZE + sx];
+            if (!is_sprite_key(color)) {
+                framebuffer[dst_y * SCREEN_W + dst_x] = color;
+            }
+        }
+    }
 }
 
 static void render_weapon(const GameState *game)
@@ -2144,52 +2622,27 @@ static void render_weapon(const GameState *game)
     double fire_t = game->weapon_flash > 0.0 ? game->weapon_flash / flash_time : 0.0;
     int recoil_y = (int)(fire_t * fire_t * 15.0);
     int recoil_x = (int)(sin(game->time * 120.0) * fire_t * 4.0);
-    int x = SCREEN_W / 2 - 24 + recoil_x;
-    int y = SCREEN_H - 42 + bob + recoil_y;
+    int sprite = WEAPON_SPRITE_PISTOL;
+    int size = 86;
+    int offset_x = 0;
+    int offset_y = 6;
 
     if (game->selected_weapon == WEAPON_KNIFE) {
-        int slash = (int)(fire_t * 18.0);
-        fill_rect(x + 29 + slash / 3, y + 18, 14, 25, rgb(78, 48, 30));
-        fill_rect(x + 32 + slash / 3, y + 20, 8, 22, rgb(138, 86, 44));
-        draw_line(x + 38 + slash, y + 4, x + 30, y + 28, rgb(190, 194, 184));
-        draw_line(x + 39 + slash, y + 5, x + 31, y + 28, rgb(92, 96, 96));
-        draw_line(x + 36 + slash, y + 4, x + 28, y + 28, rgb(236, 232, 206));
-        if (game->weapon_flash > 0.0) {
-            draw_line(x + 44 + slash, y - 2, x + 14, y + 31, rgb(255, 238, 150));
-            draw_line(x + 46 + slash, y + 0, x + 16, y + 33, rgb(216, 84, 44));
-        }
-        return;
+        sprite = game->weapon_flash > 0.0 ? WEAPON_SPRITE_KNIFE_SLASH : WEAPON_SPRITE_KNIFE;
+        size = 82;
+        offset_x = 10;
+    } else if (game->selected_weapon == WEAPON_FIREBALL) {
+        sprite = game->weapon_flash > 0.0 ? WEAPON_SPRITE_FIREBALL_CAST : WEAPON_SPRITE_FIREBALL;
+        size = 96;
+        offset_y = 2;
+    } else {
+        sprite = game->weapon_flash > 0.0 ? WEAPON_SPRITE_PISTOL_FLASH : WEAPON_SPRITE_PISTOL;
+        size = 86;
     }
 
-    if (game->selected_weapon == WEAPON_FIREBALL) {
-        fill_rect(x + 22, y + 14, 20, 28, rgb(58, 34, 24));
-        fill_rect(x + 25, y + 8, 14, 30, rgb(108, 58, 32));
-        fill_rect(x + 18, y + 4, 28, 12, rgb(80, 34, 22));
-        fill_rect(x + 22, y + 6, 20, 7, rgb(168, 66, 28));
-        fill_rect(x + 27, y + 3, 10, 10, rgb(255, 140, 36));
-        fill_rect(x + 30, y + 5, 4, 4, rgb(255, 236, 128));
-        if (game->weapon_flash > 0.0) {
-            int flash = 16 + (int)(fire_t * 30.0);
-            fill_rect(x + 32 - flash / 2, y - 8, flash, flash, rgb(255, 98, 24));
-            fill_rect(x + 32 - flash / 4, y - 2, flash / 2, flash / 2, rgb(255, 238, 120));
-        }
-        return;
-    }
-
-    fill_rect(x + 16, y + 4, 32, 12, rgb(42, 43, 46));
-    fill_rect(x + 20, y + 0, 32, 6, rgb(80, 82, 86));
-    fill_rect(x + 23, y + 6, 24, 3, rgb(132, 134, 132));
-    fill_rect(x + 29, y + 16, 13, 26, rgb(62, 42, 30));
-    fill_rect(x + 32, y + 18, 7, 22, rgb(110, 70, 38));
-    fill_rect(x + 9, y + 8, 15, 7, rgb(34, 35, 38));
-
-    if (game->weapon_flash > 0.0) {
-        int flash = 12 + (int)(fire_t * 20.0);
-        fill_rect(x - flash / 2, y - 6, flash, flash, rgb(255, 132, 28));
-        fill_rect(x - flash / 4, y - 1, flash / 2, flash / 2, rgb(255, 246, 150));
-        fill_rect(x - flash / 2 - 4, y + 2, 4, 5, rgb(255, 198, 64));
-        fill_rect(x + flash / 2, y + 2, 4, 5, rgb(255, 198, 64));
-    }
+    int x = SCREEN_W / 2 - size / 2 + recoil_x + offset_x;
+    int y = SCREEN_H - size + bob + recoil_y + offset_y;
+    draw_weapon_sprite(sprite, x, y, size);
 }
 
 static void render_hud(const GameState *game)
@@ -2217,6 +2670,15 @@ static void render_hud(const GameState *game)
     int fire_pips = game->fireball_ammo > 10 ? 10 : game->fireball_ammo;
     for (int i = 0; i < fire_pips; ++i) {
         fill_rect(224 + i * 3, SCREEN_H - 10, 2, 6, rgb(232, 92, 28));
+    }
+    if (game->gold > 0) {
+        fill_rect(238, SCREEN_H - 5, 10, 2, rgb(104, 68, 20));
+        int gold_pips = game->gold / 10;
+        if (gold_pips < 1) gold_pips = 1;
+        if (gold_pips > 6) gold_pips = 6;
+        for (int i = 0; i < gold_pips; ++i) {
+            fill_rect(238 + i * 2, SCREEN_H - 8 - (i & 1), 2, 2, rgb(238, 178, 54));
+        }
     }
     for (int i = 0; i < RELIC_COUNT; ++i) {
         int x = 258 + i * 7;
@@ -2289,6 +2751,9 @@ static void render_minimap(const Camera *cam, const GameState *game)
                          item->type == ITEM_RAPID ? rgb(54, 174, 230) :
                          item->type == ITEM_FIREBALL ? rgb(230, 88, 28) :
                          item->type == ITEM_PISTOL ? rgb(150, 154, 154) :
+                         item->type == ITEM_GOLD ? rgb(238, 178, 54) :
+                         item->type == ITEM_SHRINE ? rgb(174, 46, 42) :
+                         item->type == ITEM_BONEPILE ? rgb(164, 154, 126) :
                          item->type == ITEM_KEY ? rgb(238, 202, 86) :
                          item->type == ITEM_RELIC ? rgb(232, 210, 146) : rgb(190, 70, 230);
             fill_rect(ox + ix * cell + 1, oy + iy * cell + 1, 2, 2, c);
@@ -2350,6 +2815,9 @@ static void render_full_automap(const Camera *cam, const GameState *game)
                          item->type == ITEM_HEALTH ? rgb(218, 42, 54) :
                          item->type == ITEM_FIREBALL ? rgb(238, 94, 30) :
                          item->type == ITEM_PISTOL ? rgb(150, 154, 154) :
+                         item->type == ITEM_GOLD ? rgb(238, 178, 54) :
+                         item->type == ITEM_SHRINE ? rgb(174, 46, 42) :
+                         item->type == ITEM_BONEPILE ? rgb(164, 154, 126) :
                          item->type == ITEM_RAPID ? rgb(54, 180, 230) :
                          item->type == ITEM_DAMAGE ? rgb(190, 70, 230) :
                          item->type == ITEM_RELIC ? rgb(232, 210, 146) : rgb(220, 170, 64);
@@ -2472,17 +2940,119 @@ static void render_decals(const Camera *cam, const GameState *game)
         if (!project_sprite(cam, decal->pos, decal->radius, &sx, &sh, &depth)) {
             continue;
         }
-        double fade = clamp01(decal->life / 30.0);
-        render_screen_ellipse(sx, SCREEN_H / 2 + sh / 2, sh / 2, sh / 8 + 1, depth, rgb(38, 14, 8), 0.42 * fade);
-        render_screen_ellipse(sx, SCREEN_H / 2 + sh / 2, sh / 4, sh / 16 + 1, depth, rgb(120, 42, 18), 0.18 * fade);
+
+        int base_h = (int)(sh / decal->radius);
+        if (base_h < 1) {
+            base_h = 1;
+        }
+        int decal_w = sh;
+        int decal_h = sh / 3 + 1;
+        if (decal_w < 2 || decal_h < 2) {
+            continue;
+        }
+        int center_y = SCREEN_H / 2 + base_h / 2;
+        int start_x = sx - decal_w / 2;
+        int end_x = sx + decal_w / 2;
+        int start_y = center_y - decal_h / 2;
+        int end_y = center_y + decal_h / 2;
+        if (start_x < 0) start_x = 0;
+        if (end_x >= SCREEN_W) end_x = SCREEN_W - 1;
+        if (start_y < 0) start_y = 0;
+        if (end_y >= SCREEN_H - 14) end_y = SCREEN_H - 15;
+
+        int variant = decal->variant % DECAL_COUNT;
+        if (variant < 0) {
+            variant = 0;
+        }
+        double fade = decal->max_life > 0.0 ? clamp01(decal->life / decal->max_life) : clamp01(decal->life / 30.0);
+        double ca = cos(decal->angle);
+        double sa = sin(decal->angle);
+        for (int y = start_y; y <= end_y; ++y) {
+            double ny = (y - center_y) / (double)(decal_h / 2 + 1);
+            for (int x = start_x; x <= end_x; ++x) {
+                if (depth >= z_buffer[x] + 0.08) {
+                    continue;
+                }
+                double nx = (x - sx) / (double)(decal_w / 2 + 1);
+                double rx = nx * ca - ny * sa;
+                double ry = nx * sa + ny * ca;
+                int tx = (int)((rx * 0.5 + 0.5) * DECAL_SIZE);
+                int ty = (int)((ry * 0.5 + 0.5) * DECAL_SIZE);
+                if (tx < 0 || tx >= DECAL_SIZE || ty < 0 || ty >= DECAL_SIZE) {
+                    continue;
+                }
+                uint32_t color = decal_sprites[variant][ty * DECAL_SIZE + tx];
+                if (is_sprite_key(color)) {
+                    continue;
+                }
+                int idx = y * SCREEN_W + x;
+                double amount = (0.48 + 0.28 * luminance(color)) * fade;
+                framebuffer[idx] = mix_color(framebuffer[idx], apply_fog(color, depth, 0.58), clamp01(amount));
+            }
+        }
     }
+}
+
+static uint32_t apply_wall_decals(const GameState *game, int map_x, int map_y, int side, double wall_u, double wall_v, uint32_t lit)
+{
+    for (int i = 0; i < MAX_WALL_DECALS; ++i) {
+        const WallDecal *decal = &game->wall_decals[i];
+        if (!decal->active || decal->x != map_x || decal->y != map_y || decal->side != side) {
+            continue;
+        }
+
+        double du = (wall_u - decal->u) / decal->width + 0.5;
+        double dv = (wall_v - decal->v) / decal->height + 0.5;
+        if (du < 0.0 || du >= 1.0 || dv < 0.0 || dv >= 1.0) {
+            continue;
+        }
+
+        int variant = decal->variant % WALL_DECAL_COUNT;
+        if (variant < 0) {
+            variant = 0;
+        }
+        int tx = (int)(du * WALL_DECAL_SIZE);
+        int ty = (int)(dv * WALL_DECAL_SIZE);
+        if (tx < 0 || tx >= WALL_DECAL_SIZE || ty < 0 || ty >= WALL_DECAL_SIZE) {
+            continue;
+        }
+
+        uint32_t color = wall_decal_sprites[variant][ty * WALL_DECAL_SIZE + tx];
+        if (is_sprite_key(color)) {
+            continue;
+        }
+
+        double amount = clamp01(decal->strength * (0.50 + luminance(color) * 0.30));
+        lit = mix_color(lit, color, amount);
+    }
+    return lit;
+}
+
+static double elapsed_ms(uint64_t start, uint64_t end)
+{
+    return (double)(end - start) * 1000.0 / (double)SDL_GetPerformanceFrequency();
 }
 
 static void render_scene(const Camera *cam, const GameState *game)
 {
+    int fast_render = render_quality == RENDER_QUALITY_FAST;
+    RenderProfile *profile = active_profile;
+    uint64_t total_start = 0;
+    uint64_t pass_start = 0;
+    if (profile) {
+        memset(profile, 0, sizeof(*profile));
+        total_start = SDL_GetPerformanceCounter();
+        pass_start = total_start;
+    }
+
     reset_render_buffers();
     render_floor_ceiling(cam, game);
     render_forest_moon(cam, game);
+    if (profile) {
+        uint64_t now = SDL_GetPerformanceCounter();
+        profile->floor_ms = elapsed_ms(pass_start, now);
+        pass_start = now;
+    }
 
     for (int x = 0; x < SCREEN_W; ++x) {
         double camera_x = 2.0 * x / (double)SCREEN_W - 1.0;
@@ -2571,17 +3141,50 @@ static void render_scene(const Camera *cam, const GameState *game)
         double player_light = player_torch_light_at(cam, game, hit_x, hit_y);
         double torch_light = clamp01(torch_light_at(hit_x, hit_y, game->time) * (side == 1 ? 0.92 : 1.08) + player_light);
         double moon_light = game->generator_mode == GENERATOR_FOREST ? forest_moon_visibility_at(hit_x, hit_y) : 0.0;
+        double fresnel = 0.0;
+        double bump_light_x = 0.0;
+        double bump_light_y = 0.0;
+        if (!fast_render) {
+            double ray_len = sqrt(ray_dir_x * ray_dir_x + ray_dir_y * ray_dir_y);
+            double view_facing = ray_len > 0.001
+                ? (side == 0 ? fabs(ray_dir_x) / ray_len : fabs(ray_dir_y) / ray_len)
+                : 1.0;
+            fresnel = pow5(1.0 - clamp01(view_facing));
+            wall_bump_light_vector(hit_x, hit_y, &bump_light_x, &bump_light_y);
+        }
+        uint32_t tint = game->generator_mode == GENERATOR_FOREST ? rgb(130, 154, 138) : rgb(255, 132, 48);
+        uint32_t torch_tint = rgb(255, 132, 48);
         z_buffer[x] = perp_wall_dist;
 
         for (int y = draw_start; y <= draw_end; ++y) {
             int tex_y = ((int)tex_pos) & (TEX_SIZE - 1);
             tex_pos += step;
-            uint32_t color = textures[tex_idx][tex_y * TEX_SIZE + tex_x];
-            double bump = wall_bump_light(tex_idx, tex_x, tex_y, hit_x, hit_y);
-            uint32_t lit = apply_torch_light(color, light * (0.84 + bump * 0.22), torch_light * (0.72 + bump * 0.50), 0.30);
+            int texel_idx = tex_y * TEX_SIZE + tex_x;
+            uint32_t color = textures[tex_idx][texel_idx];
+            double bump = fast_render ? 0.5 : wall_bump_light(tex_idx, tex_x, tex_y, bump_light_x, bump_light_y);
+            uint32_t lit;
+            if (fast_render) {
+                lit = apply_fast_material(
+                    color,
+                    light * (0.84 + bump * 0.22) + torch_light * (0.62 + bump * 0.30) + moon_light * 0.08,
+                    torch_light * (0.72 + bump * 0.50) + moon_light * 0.13);
+            } else {
+                lit = apply_pbr_material(
+                    color,
+                    &texture_materials[tex_idx],
+                    light * (0.84 + bump * 0.22) + torch_light * (0.62 + bump * 0.30) + moon_light * 0.08,
+                    torch_light * (0.72 + bump * 0.50) + moon_light * 0.13,
+                    bump,
+                    fresnel,
+                    texture_bright[tex_idx][texel_idx],
+                    game->generator_mode == GENERATOR_FOREST ? 0.06 : 0.0,
+                    tint);
+            }
+            lit = mix_color(lit, torch_tint, clamp01(torch_light * 0.10));
             if (game->generator_mode == GENERATOR_FOREST) {
                 lit = mix_color(lit, rgb(106, 136, 120), moon_light * (0.12 + bump * 0.06));
             }
+            lit = apply_wall_decals(game, map_x, map_y, side, (tex_x + 0.5) / TEX_SIZE, (tex_y + 0.5) / TEX_SIZE, lit);
             framebuffer[y * SCREEN_W + x] = apply_game_fog(game, lit, perp_wall_dist, game->generator_mode == GENERATOR_FOREST ? 1.22 : 1.0);
             depth_buffer[y * SCREEN_W + x] = perp_wall_dist;
             add_light(x, y, torch_light * 0.10 + player_light * 0.05);
@@ -2590,15 +3193,44 @@ static void render_scene(const Camera *cam, const GameState *game)
             }
         }
     }
+    if (profile) {
+        uint64_t now = SDL_GetPerformanceCounter();
+        profile->wall_ms = elapsed_ms(pass_start, now);
+        pass_start = now;
+    }
 
     render_decals(cam, game);
     render_dynamic_shadows(cam, game);
     render_world_sprites(cam, game);
+    if (profile) {
+        uint64_t now = SDL_GetPerformanceCounter();
+        profile->sprite_ms = elapsed_ms(pass_start, now);
+        pass_start = now;
+    }
+
     render_volumetric_fog(cam, game);
+    if (profile) {
+        uint64_t now = SDL_GetPerformanceCounter();
+        profile->fog_ms = elapsed_ms(pass_start, now);
+        pass_start = now;
+    }
+
     render_light_buffer();
     render_bloom();
+    if (profile) {
+        uint64_t now = SDL_GetPerformanceCounter();
+        profile->bloom_ms = elapsed_ms(pass_start, now);
+        pass_start = now;
+    }
+
     render_color_grade(game);
     render_hit_flash(game);
+    if (profile) {
+        uint64_t now = SDL_GetPerformanceCounter();
+        profile->post_ms = elapsed_ms(pass_start, now);
+        pass_start = now;
+    }
+
     render_crosshair();
     render_shot_trace(game);
     render_weapon(game);
@@ -2610,6 +3242,9 @@ static void render_scene(const Camera *cam, const GameState *game)
     if (game->show_automap) {
         render_full_automap(cam, game);
         render_hud(game);
+    }
+    if (profile) {
+        profile->total_ms = elapsed_ms(total_start, SDL_GetPerformanceCounter());
     }
 }
 
@@ -2694,6 +3329,7 @@ static int monster_max_hp(int type)
     case 1: return 4;
     case 2: return 5;
     case 3: return 4;
+    case MONSTER_FLYING_HEAD: return 10;
     default: return 4;
     }
 }
@@ -2705,6 +3341,7 @@ static double monster_patrol_speed(int type)
     case 1: return 1.05;
     case 2: return 1.28;
     case 3: return 1.10;
+    case MONSTER_FLYING_HEAD: return 0.88;
     default: return 1.05;
     }
 }
@@ -2716,6 +3353,7 @@ static double monster_chase_speed(int type)
     case 1: return 1.55;
     case 2: return 1.95;
     case 3: return 1.35;
+    case MONSTER_FLYING_HEAD: return 1.30;
     default: return 1.45;
     }
 }
@@ -2727,6 +3365,7 @@ static double monster_attack_speed(int type)
     case 1: return 1.65;
     case 2: return 2.10;
     case 3: return 1.45;
+    case MONSTER_FLYING_HEAD: return 1.25;
     default: return 1.55;
     }
 }
@@ -2738,6 +3377,7 @@ static double monster_retreat_speed(int type)
     case 1: return 1.25;
     case 2: return 1.45;
     case 3: return 1.05;
+    case MONSTER_FLYING_HEAD: return 1.18;
     default: return 1.0;
     }
 }
@@ -2749,13 +3389,14 @@ static double monster_preferred_distance(int type)
     case 1: return 4.8;
     case 2: return 1.15;
     case 3: return 1.05;
+    case MONSTER_FLYING_HEAD: return 5.4;
     default: return 1.2;
     }
 }
 
 static int monster_uses_projectile(int type)
 {
-    return type == 1;
+    return type == 1 || type == MONSTER_FLYING_HEAD;
 }
 
 static double monster_melee_range(int type)
@@ -2785,6 +3426,7 @@ static double monster_front_notice_distance(int type)
     case 1: return 7.4;
     case 2: return 6.2;
     case 3: return 6.0;
+    case MONSTER_FLYING_HEAD: return 8.4;
     default: return 7.4;
     }
 }
@@ -2796,6 +3438,7 @@ static double monster_close_notice_distance(int type)
     case 1: return 2.55;
     case 2: return 2.85;
     case 3: return 2.20;
+    case MONSTER_FLYING_HEAD: return 3.0;
     default: return 2.55;
     }
 }
@@ -2807,6 +3450,7 @@ static double monster_fov_dot(int type)
     case 1: return 0.30;
     case 2: return 0.42;
     case 3: return 0.34;
+    case MONSTER_FLYING_HEAD: return 0.24;
     default: return 0.30;
     }
 }
@@ -2881,6 +3525,7 @@ static double monster_shot_cooldown(int type, int index)
     case 1: return 1.15 + offset;
     case 2: return 0.82 + offset * 0.35;
     case 3: return 0.92 + offset * 0.40;
+    case MONSTER_FLYING_HEAD: return 1.35 + offset * 0.50;
     default: return 1.0 + offset;
     }
 }
@@ -2889,6 +3534,7 @@ static int monster_projectile_damage(int type)
 {
     switch (type) {
     case 1: return 9;
+    case MONSTER_FLYING_HEAD: return 12;
     default: return 0;
     }
 }
@@ -3345,6 +3991,8 @@ static void place_dungeon_relic(GameState *game)
     };
 }
 
+static void spawn_decal(GameState *game, Vec2 pos, int variant, double radius, double life, double angle);
+
 static void place_generated_items(GameState *game, LevelRng *rng)
 {
     static const int item_types[MAX_ITEMS] = {
@@ -3352,20 +4000,95 @@ static void place_generated_items(GameState *game, LevelRng *rng)
         ITEM_HEALTH, ITEM_RAPID, ITEM_DAMAGE, ITEM_AMMO, ITEM_HEALTH,
         ITEM_AMMO, ITEM_HEALTH, ITEM_FIREBALL, ITEM_AMMO, ITEM_HEALTH,
         ITEM_DAMAGE, ITEM_FIREBALL, ITEM_RAPID, ITEM_AMMO, ITEM_HEALTH,
+        ITEM_GOLD, ITEM_SHRINE, ITEM_BONEPILE, ITEM_GOLD, ITEM_BONEPILE,
+        ITEM_SHRINE, ITEM_GOLD, ITEM_BONEPILE,
     };
     for (int i = 0; i < MAX_ITEMS; ++i) {
         double min_dist = i <= 1 ? 2.0 : 24.0;
         Vec2 pos = i == 0 ? (Vec2){4.5, 22.5} :
             (i == 1 ? (Vec2){5.5, 22.5} : pick_floor_spot(rng, game, min_dist));
-        game->items[i] = (Item){1, item_types[i], -1, pos};
+        int payload = -1;
+        if (item_types[i] == ITEM_GOLD) {
+            payload = 6 + (i % 4) * 4;
+        } else if (item_types[i] == ITEM_SHRINE) {
+            payload = i % 3;
+        }
+        game->items[i] = (Item){1, item_types[i], payload, pos};
+    }
+}
+
+static void place_generated_decals(GameState *game, LevelRng *rng)
+{
+    int target = game->generator_mode == GENERATOR_FOREST ? 22 : 34;
+    int placed = 0;
+    for (int attempt = 0; attempt < 320 && placed < target; ++attempt) {
+        int x = rng_range(rng, 1, MAP_W - 2);
+        int y = rng_range(rng, 1, MAP_H - 2);
+        if (!generated_floor(x, y) || occupied_spawn_tile(game, x, y) || start_dist2(x, y) < 10.0) {
+            continue;
+        }
+        Vec2 pos = {
+            x + 0.18 + (rng_next(rng) % 65u) / 100.0,
+            y + 0.18 + (rng_next(rng) % 65u) / 100.0,
+        };
+        int variant = (int)(rng_next(rng) % DECAL_COUNT);
+        double radius = 0.34 + (rng_next(rng) % 62u) / 100.0;
+        if (variant == 3 || variant == 13) {
+            radius += 0.18;
+        }
+        spawn_decal(game, pos, variant, radius, 1200.0, (rng_next(rng) % 628u) / 100.0);
+        placed++;
+    }
+}
+
+static void place_generated_wall_decals(GameState *game, LevelRng *rng)
+{
+    int target = game->generator_mode == GENERATOR_FOREST ? 14 : 42;
+    int count = 0;
+    memset(game->wall_decals, 0, sizeof(game->wall_decals));
+
+    for (int attempt = 0; attempt < 700 && count < target && count < MAX_WALL_DECALS; ++attempt) {
+        int x = rng_range(rng, 1, MAP_W - 2);
+        int y = rng_range(rng, 1, MAP_H - 2);
+        if (map_at(x, y) <= 0) {
+            continue;
+        }
+
+        int side = -1;
+        int vertical = generated_floor(x - 1, y) || generated_floor(x + 1, y);
+        int horizontal = generated_floor(x, y - 1) || generated_floor(x, y + 1);
+        if (vertical && horizontal) {
+            side = (rng_next(rng) & 1u) ? 0 : 1;
+        } else if (vertical) {
+            side = 0;
+        } else if (horizontal) {
+            side = 1;
+        } else {
+            continue;
+        }
+        if (start_dist2(x, y) < 8.0) {
+            continue;
+        }
+
+        WallDecal *decal = &game->wall_decals[count++];
+        decal->active = 1;
+        decal->x = x;
+        decal->y = y;
+        decal->side = side;
+        decal->variant = (int)(rng_next(rng) % WALL_DECAL_COUNT);
+        decal->u = 0.22 + (rng_next(rng) % 57u) / 100.0;
+        decal->v = 0.26 + (rng_next(rng) % 43u) / 100.0;
+        decal->width = 0.34 + (rng_next(rng) % 38u) / 100.0;
+        decal->height = 0.30 + (rng_next(rng) % 42u) / 100.0;
+        decal->strength = 0.42 + (rng_next(rng) % 36u) / 100.0;
     }
 }
 
 static void place_generated_monsters(GameState *game, LevelRng *rng, int boss_room, LevelRoom room)
 {
     game->monster_count = MAX_MONSTERS;
-    static const int dungeon_types[MAX_MONSTERS] = {1, 1, 1, 0, 1, 2, 3, 1, 0, 2};
-    static const int forest_types[MAX_MONSTERS] = {2, 3, 1, 0, 3, 2, 1, 3, 0, 2};
+    static const int dungeon_types[MAX_MONSTERS] = {1, MONSTER_FLYING_HEAD, 1, 0, 1, 2, 3, MONSTER_FLYING_HEAD, 0, 2};
+    static const int forest_types[MAX_MONSTERS] = {2, 3, 1, MONSTER_FLYING_HEAD, 3, 2, 1, 3, MONSTER_FLYING_HEAD, 2};
     const int *monster_types = game->generator_mode == GENERATOR_FOREST ? forest_types : dungeon_types;
     for (int i = 0; i < game->monster_count; ++i) {
         Monster *monster = &game->monsters[i];
@@ -3530,6 +4253,8 @@ static void generate_level(GameState *game, uint32_t seed, int mode)
         place_generated_torches(game);
     }
     place_generated_items(game, &rng);
+    place_generated_decals(game, &rng);
+    place_generated_wall_decals(game, &rng);
     place_generated_monsters(game, &rng, mode == GENERATOR_BOSS, boss_room);
 }
 
@@ -3761,6 +4486,46 @@ static void update_monster(GameState *game, int monster_index, const Camera *cam
     }
 }
 
+static void spawn_decal(GameState *game, Vec2 pos, int variant, double radius, double life, double angle)
+{
+    int slot = -1;
+    double weakest_life = 1e30;
+    for (int i = 0; i < MAX_DECALS; ++i) {
+        Decal *decal = &game->decals[i];
+        if (!decal->active) {
+            slot = i;
+            break;
+        }
+        if (decal->life < weakest_life) {
+            weakest_life = decal->life;
+            slot = i;
+        }
+    }
+    if (slot < 0) {
+        return;
+    }
+    if (radius < 0.08) {
+        radius = 0.08;
+    }
+    if (life < 0.25) {
+        life = 0.25;
+    }
+
+    Decal *decal = &game->decals[slot];
+    memset(decal, 0, sizeof(*decal));
+    decal->active = 1;
+    decal->type = variant;
+    decal->variant = variant % DECAL_COUNT;
+    if (decal->variant < 0) {
+        decal->variant = 0;
+    }
+    decal->pos = pos;
+    decal->radius = radius;
+    decal->life = life;
+    decal->max_life = life;
+    decal->angle = angle;
+}
+
 static void spawn_explosion(GameState *game, Vec2 pos, double radius)
 {
     play_sfx(SFX_EXPLOSION, 0.52);
@@ -3778,17 +4543,7 @@ static void spawn_explosion(GameState *game, Vec2 pos, double radius)
         }
     }
 
-    for (int i = 0; i < MAX_DECALS; ++i) {
-        Decal *d = &game->decals[i];
-        if (!d->active) {
-            d->active = 1;
-            d->type = 0;
-            d->pos = pos;
-            d->radius = radius * 0.85;
-            d->life = 30.0;
-            break;
-        }
-    }
+    spawn_decal(game, pos, 2 + (game->kills % 2) * 10, radius * 0.92, 42.0, game->time * 0.73);
 
     for (int i = 0; i < 10; ++i) {
         for (int j = 0; j < MAX_PARTICLES; ++j) {
@@ -3809,6 +4564,20 @@ static void spawn_explosion(GameState *game, Vec2 pos, double radius)
     }
 }
 
+static void spawn_gold_drop(GameState *game, Vec2 pos, int amount)
+{
+    for (int i = 0; i < MAX_ITEMS; ++i) {
+        Item *item = &game->items[i];
+        if (!item->active) {
+            item->active = 1;
+            item->type = ITEM_GOLD;
+            item->relic_index = amount;
+            item->pos = pos;
+            return;
+        }
+    }
+}
+
 static void damage_monster(GameState *game, Monster *monster, int damage, Vec2 source)
 {
     if (!monster->active) {
@@ -3825,6 +4594,13 @@ static void damage_monster(GameState *game, Monster *monster, int damage, Vec2 s
     if (push.x != 0.0 || push.y != 0.0) {
         move_monster_by(monster, (Vec2){push.x * 0.08, push.y * 0.08});
     }
+    spawn_decal(
+        game,
+        monster->pos,
+        monster->hp <= 0 ? 15 : (damage > 3 ? 0 : 1),
+        monster->is_boss ? 1.15 : (0.38 + damage * 0.05),
+        monster->hp <= 0 ? 55.0 : 34.0,
+        atan2(push.y, push.x));
 
     if (monster->hp <= 0) {
         int boss_killed = monster->is_boss && game->generator_mode == GENERATOR_BOSS;
@@ -3832,6 +4608,7 @@ static void damage_monster(GameState *game, Monster *monster, int damage, Vec2 s
         game->kills += 1;
         play_sfx(SFX_DEATH, 0.55);
         spawn_explosion(game, monster->pos, boss_killed ? 1.35 : 0.80);
+        spawn_gold_drop(game, monster->pos, monster->is_boss ? 70 : (6 + monster->type * 4));
         if (boss_killed) {
             game->victory = 1;
         }
@@ -4027,6 +4804,30 @@ static void pickup_item(GameState *game, Item *item)
             game->ammo = 99;
         }
         break;
+    case ITEM_GOLD:
+        game->gold += item->relic_index > 0 ? item->relic_index : 5;
+        if (game->gold > 999) {
+            game->gold = 999;
+        }
+        break;
+    case ITEM_SHRINE:
+        if (item->relic_index == 0) {
+            game->player_health += 70;
+            if (game->player_health > PLAYER_MAX_HEALTH) {
+                game->player_health = PLAYER_MAX_HEALTH;
+            }
+        } else if (item->relic_index == 1) {
+            game->damage_timer = 18.0;
+            game->rapid_timer = 10.0;
+        } else {
+            game->fireball_unlocked = 1;
+            game->fireball_ammo += 4;
+            if (game->fireball_ammo > MAX_FIREBALL_AMMO) {
+                game->fireball_ammo = MAX_FIREBALL_AMMO;
+            }
+        }
+        play_sfx(SFX_PORTAL, 0.38);
+        break;
     case ITEM_RELIC:
         if (item->relic_index >= 0 && item->relic_index < RELIC_COUNT) {
             game->relic_mask |= 1 << item->relic_index;
@@ -4065,6 +4866,9 @@ static void update_items(GameState *game, const Camera *cam)
         if (!item->active) {
             continue;
         }
+        if (item->type == ITEM_BONEPILE) {
+            continue;
+        }
 
         double dx = item->pos.x - cam->pos.x;
         double dy = item->pos.y - cam->pos.y;
@@ -4094,10 +4898,17 @@ static int portal_matches(const Portal *portal, int tx, int ty, int px, int py)
 
 static uint8_t prompt_glyph(char c, int row)
 {
+    static const uint8_t glyph_0[7] = {14, 17, 19, 21, 25, 17, 14};
     static const uint8_t glyph_1[7] = {4, 12, 4, 4, 4, 4, 14};
     static const uint8_t glyph_2[7] = {14, 17, 1, 2, 4, 8, 31};
     static const uint8_t glyph_3[7] = {30, 1, 1, 14, 1, 1, 30};
     static const uint8_t glyph_4[7] = {2, 6, 10, 18, 31, 2, 2};
+    static const uint8_t glyph_5[7] = {31, 16, 16, 30, 1, 1, 30};
+    static const uint8_t glyph_6[7] = {14, 16, 16, 30, 17, 17, 14};
+    static const uint8_t glyph_7[7] = {31, 1, 2, 4, 8, 8, 8};
+    static const uint8_t glyph_8[7] = {14, 17, 17, 14, 17, 17, 14};
+    static const uint8_t glyph_9[7] = {14, 17, 17, 15, 1, 1, 14};
+    static const uint8_t glyph_dot[7] = {0, 0, 0, 0, 0, 12, 12};
     static const uint8_t glyph_slash[7] = {1, 1, 2, 4, 8, 16, 16};
     static const uint8_t glyph_a[7] = {14, 17, 17, 31, 17, 17, 17};
     static const uint8_t glyph_b[7] = {30, 17, 17, 30, 17, 17, 30};
@@ -4124,10 +4935,17 @@ static uint8_t prompt_glyph(char c, int row)
     static const uint8_t glyph_z[7] = {31, 1, 2, 4, 8, 16, 31};
 
     switch (c) {
+    case '0': return glyph_0[row];
     case '1': return glyph_1[row];
     case '2': return glyph_2[row];
     case '3': return glyph_3[row];
     case '4': return glyph_4[row];
+    case '5': return glyph_5[row];
+    case '6': return glyph_6[row];
+    case '7': return glyph_7[row];
+    case '8': return glyph_8[row];
+    case '9': return glyph_9[row];
+    case '.': return glyph_dot[row];
     case '/': return glyph_slash[row];
     case 'A': return glyph_a[row];
     case 'B': return glyph_b[row];
@@ -4196,6 +5014,57 @@ static void blend_rect(int x, int y, int w, int h, uint32_t color, double amount
             }
         }
     }
+}
+
+static void render_fps_overlay(double fps, double frame_ms, int quality)
+{
+    char fps_text[16];
+    char ms_text[16];
+    const char *quality_text = quality == RENDER_QUALITY_FAST ? "FAST" : "PBR";
+    int fps_int = (int)(fps + 0.5);
+    int ms_int = (int)(frame_ms + 0.5);
+    if (fps_int < 0) fps_int = 0;
+    if (fps_int > 999) fps_int = 999;
+    if (ms_int < 0) ms_int = 0;
+    if (ms_int > 999) ms_int = 999;
+    snprintf(fps_text, sizeof(fps_text), "FPS %d", fps_int);
+    snprintf(ms_text, sizeof(ms_text), "MS %d", ms_int);
+
+    int w = prompt_text_width(fps_text);
+    int ms_w = prompt_text_width(ms_text);
+    if (ms_w > w) {
+        w = ms_w;
+    }
+    int quality_w = prompt_text_width(quality_text);
+    if (quality_w > w) {
+        w = quality_w;
+    }
+    blend_rect(4, 4, w + 10, 54, rgb(0, 0, 0), 0.52);
+    draw_prompt_text(9, 9, fps_text, rgb(230, 226, 190));
+    draw_prompt_text(9, 25, ms_text, rgb(176, 196, 174));
+    draw_prompt_text(9, 41, quality_text, quality == RENDER_QUALITY_FAST ? rgb(238, 178, 54) : rgb(196, 188, 176));
+}
+
+static void draw_timing_line(int y, const char *label, double ms, uint32_t color)
+{
+    char text[32];
+    if (ms > 99.9) {
+        ms = 99.9;
+    }
+    snprintf(text, sizeof(text), "%s %.1f", label, ms);
+    draw_prompt_text(9, y, text, color);
+}
+
+static void render_timing_overlay(const RenderProfile *profile)
+{
+    blend_rect(4, 62, 142, 116, rgb(0, 0, 0), 0.54);
+    draw_timing_line(67, "FLOOR", profile->floor_ms, rgb(230, 226, 190));
+    draw_timing_line(83, "WALL", profile->wall_ms, rgb(230, 226, 190));
+    draw_timing_line(99, "SPRITE", profile->sprite_ms, rgb(210, 218, 184));
+    draw_timing_line(115, "FOG", profile->fog_ms, rgb(176, 196, 174));
+    draw_timing_line(131, "BLOOM", profile->bloom_ms, rgb(218, 176, 130));
+    draw_timing_line(147, "POST", profile->post_ms, rgb(196, 188, 176));
+    draw_timing_line(163, "TOTAL", profile->total_ms, rgb(238, 210, 146));
 }
 
 static const Portal *active_portal_prompt(const GameState *game, const Camera *cam)
@@ -4316,6 +5185,7 @@ static void copy_player_progress(GameState *dst, const GameState *src)
     dst->selected_weapon = src->selected_weapon;
     dst->pistol_unlocked = src->pistol_unlocked;
     dst->fireball_unlocked = src->fireball_unlocked;
+    dst->gold = src->gold;
     dst->rapid_timer = src->rapid_timer;
     dst->damage_timer = src->damage_timer;
 }
@@ -5023,6 +5893,54 @@ static int verify_items_and_fog(void)
         return 0;
     }
 
+    int gold_item = -1;
+    int shrine_item = -1;
+    int bonepile_item = -1;
+    for (int i = 0; i < MAX_ITEMS; ++i) {
+        if (game.items[i].active && game.items[i].type == ITEM_GOLD && gold_item < 0) {
+            gold_item = i;
+        } else if (game.items[i].active && game.items[i].type == ITEM_SHRINE && shrine_item < 0) {
+            shrine_item = i;
+        } else if (game.items[i].active && game.items[i].type == ITEM_BONEPILE && bonepile_item < 0) {
+            bonepile_item = i;
+        }
+    }
+    if (gold_item < 0 || shrine_item < 0 || bonepile_item < 0) {
+        fprintf(stderr, "error: generated level is missing Diablo-style pickups or props\n");
+        return 0;
+    }
+
+    int gold_before = game.gold;
+    cam.pos = game.items[gold_item].pos;
+    update_items(&game, &cam);
+    if (game.items[gold_item].active || game.gold <= gold_before) {
+        fprintf(stderr, "error: gold pickup verification failed\n");
+        return 0;
+    }
+
+    game.player_health = 50;
+    game.rapid_timer = 0.0;
+    game.damage_timer = 0.0;
+    int fireball_before = game.fireball_ammo;
+    int shrine_kind = game.items[shrine_item].relic_index;
+    cam.pos = game.items[shrine_item].pos;
+    update_items(&game, &cam);
+    if (game.items[shrine_item].active ||
+        (shrine_kind == 0 && game.player_health <= 50) ||
+        (shrine_kind == 1 && (game.rapid_timer <= 0.0 || game.damage_timer <= 0.0)) ||
+        (shrine_kind == 2 && (!game.fireball_unlocked || game.fireball_ammo <= fireball_before))) {
+        fprintf(stderr, "error: shrine pickup verification failed\n");
+        return 0;
+    }
+
+    game.pickup_flash = 0.0;
+    cam.pos = game.items[bonepile_item].pos;
+    update_items(&game, &cam);
+    if (!game.items[bonepile_item].active || game.pickup_flash > 0.0) {
+        fprintf(stderr, "error: bone pile prop should not be picked up\n");
+        return 0;
+    }
+
     cam.pos = (Vec2){2.5, 22.5};
     reveal_fog(&game, &cam);
     if (!game.discovered[22][2] || !game.discovered[22][4]) {
@@ -5203,10 +6121,12 @@ static int verify_monster_roles(void)
         return 0;
     }
     if (!(monster_uses_projectile(1) &&
+          monster_uses_projectile(MONSTER_FLYING_HEAD) &&
           !monster_uses_projectile(0) &&
           !monster_uses_projectile(2) &&
           !monster_uses_projectile(3) &&
-          monster_projectile_damage(1) > 0)) {
+          monster_projectile_damage(1) > 0 &&
+          monster_projectile_damage(MONSTER_FLYING_HEAD) > monster_projectile_damage(1))) {
         fprintf(stderr, "error: monster attack roles are not deterministic\n");
         return 0;
     }
@@ -5929,6 +6849,254 @@ static int dump_forest_forward_frames(const char *prefix)
     return 0;
 }
 
+typedef struct {
+    SDL_Window *window;
+    SDL_Renderer *renderer;
+    SDL_Texture *screen;
+    Camera cam;
+    GameState game;
+    int running;
+    int paused;
+    int fullscreen;
+    int show_fps;
+    int show_timings;
+    int render_quality;
+    int fps_frames;
+    uint64_t prev;
+    double fps_accum;
+    double fps_value;
+    double frame_ms;
+    RenderProfile profile;
+} Runtime;
+
+static void shutdown_runtime(Runtime *rt)
+{
+    if (rt->screen) {
+        SDL_DestroyTexture(rt->screen);
+        rt->screen = NULL;
+    }
+    if (rt->renderer) {
+        SDL_DestroyRenderer(rt->renderer);
+        rt->renderer = NULL;
+    }
+    if (rt->window) {
+        SDL_DestroyWindow(rt->window);
+        rt->window = NULL;
+    }
+    shutdown_audio();
+    SDL_Quit();
+}
+
+static int init_runtime(Runtime *rt)
+{
+    memset(rt, 0, sizeof(*rt));
+
+    if (!init_assets()) {
+        return 0;
+    }
+
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0) {
+        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return 0;
+    }
+    if (!init_audio()) {
+        SDL_Quit();
+        return 0;
+    }
+
+    rt->window = SDL_CreateWindow(
+        "Software Raycaster",
+        SDL_WINDOWPOS_CENTERED,
+        SDL_WINDOWPOS_CENTERED,
+        SCREEN_W * WINDOW_SCALE,
+        SCREEN_H * WINDOW_SCALE,
+        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+    if (!rt->window) {
+        fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+        shutdown_audio();
+        SDL_Quit();
+        return 0;
+    }
+
+    rt->renderer = SDL_CreateRenderer(
+        rt->window,
+        -1,
+        SDL_RENDERER_SOFTWARE | SDL_RENDERER_PRESENTVSYNC);
+    if (!rt->renderer) {
+        fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
+        shutdown_runtime(rt);
+        return 0;
+    }
+    SDL_RenderSetLogicalSize(rt->renderer, SCREEN_W, SCREEN_H);
+
+    rt->screen = SDL_CreateTexture(
+        rt->renderer,
+        SDL_PIXELFORMAT_ARGB8888,
+        SDL_TEXTUREACCESS_STREAMING,
+        SCREEN_W,
+        SCREEN_H);
+    if (!rt->screen) {
+        fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
+        shutdown_runtime(rt);
+        return 0;
+    }
+
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
+
+    runtime_level_seed = LEVEL_TEST_SEED ^ (uint32_t)SDL_GetTicks() ^ (uint32_t)SDL_GetPerformanceCounter();
+    reset_run(&rt->game, &rt->cam);
+
+    rt->running = 1;
+    rt->render_quality = RENDER_QUALITY_PBR;
+    rt->prev = SDL_GetPerformanceCounter();
+    return 1;
+}
+
+static void runtime_frame(void *userdata)
+{
+    Runtime *rt = (Runtime *)userdata;
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) {
+            rt->running = 0;
+        } else if (event.type == SDL_KEYDOWN) {
+            int help_closed = close_help_on_key(&rt->game);
+            SDL_Keycode key = event.key.keysym.sym;
+            if (key == SDLK_ESCAPE) {
+                rt->running = 0;
+            } else if (key == SDLK_1) {
+                select_weapon(&rt->game, WEAPON_KNIFE);
+            } else if (key == SDLK_2) {
+                select_weapon(&rt->game, WEAPON_PISTOL);
+            } else if (key == SDLK_3 && event.key.repeat == 0) {
+                select_weapon(&rt->game, WEAPON_FIREBALL);
+            } else if (key == SDLK_4 && event.key.repeat == 0) {
+                runtime_level_mode = GENERATOR_ROOMS;
+                reset_run(&rt->game, &rt->cam);
+                rt->paused = 0;
+            } else if (key == SDLK_5 && event.key.repeat == 0) {
+                runtime_level_mode = GENERATOR_TIGHT;
+                reset_run(&rt->game, &rt->cam);
+                rt->paused = 0;
+            } else if (key == SDLK_6 && event.key.repeat == 0) {
+                runtime_level_mode = GENERATOR_BOSS;
+                reset_run(&rt->game, &rt->cam);
+                rt->paused = 0;
+            } else if (key == SDLK_7 && event.key.repeat == 0) {
+                runtime_level_mode = GENERATOR_FOREST;
+                reset_run(&rt->game, &rt->cam);
+                rt->paused = 0;
+            } else if (key == SDLK_SPACE) {
+                if (!rt->paused) {
+                    player_fire(&rt->game, &rt->cam);
+                }
+            } else if (key == SDLK_f) {
+                if (!rt->paused) {
+                    interact_world(&rt->game, &rt->cam);
+                }
+            } else if (key == SDLK_TAB && event.key.repeat == 0) {
+                rt->game.show_automap = !rt->game.show_automap;
+            } else if (key == SDLK_h && event.key.repeat == 0) {
+                if (!help_closed) {
+                    rt->game.show_help = 1;
+                    rt->game.help_timer = 0.0;
+                }
+            } else if (key == SDLK_p && event.key.repeat == 0) {
+                rt->paused = !rt->paused;
+            } else if (key == SDLK_r && event.key.repeat == 0) {
+                reset_run(&rt->game, &rt->cam);
+                rt->paused = 0;
+            } else if (key == SDLK_F3 && event.key.repeat == 0) {
+                rt->show_fps = !rt->show_fps;
+                rt->fps_accum = 0.0;
+                rt->fps_frames = 0;
+            } else if (key == SDLK_F4 && event.key.repeat == 0) {
+                rt->show_timings = !rt->show_timings;
+            } else if (key == SDLK_F5 && event.key.repeat == 0) {
+                rt->render_quality = rt->render_quality == RENDER_QUALITY_FAST ? RENDER_QUALITY_PBR : RENDER_QUALITY_FAST;
+            } else if (key == SDLK_F11 && event.key.repeat == 0) {
+                rt->fullscreen = !rt->fullscreen;
+                if (SDL_SetWindowFullscreen(rt->window, rt->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {
+                    fprintf(stderr, "SDL_SetWindowFullscreen failed: %s\n", SDL_GetError());
+                    rt->running = 0;
+                }
+            }
+        } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+            if (!rt->paused) {
+                player_fire(&rt->game, &rt->cam);
+            }
+        }
+    }
+
+    if (!rt->running) {
+#ifdef __EMSCRIPTEN__
+        emscripten_cancel_main_loop();
+#endif
+        shutdown_runtime(rt);
+        return;
+    }
+
+    uint64_t now = SDL_GetPerformanceCounter();
+    double dt = (double)(now - rt->prev) / (double)SDL_GetPerformanceFrequency();
+    rt->prev = now;
+    if (dt > 0.0) {
+        rt->fps_accum += dt;
+        rt->fps_frames += 1;
+        if (rt->fps_accum >= 0.25) {
+            rt->fps_value = rt->fps_frames / rt->fps_accum;
+            rt->frame_ms = 1000.0 / rt->fps_value;
+            rt->fps_accum = 0.0;
+            rt->fps_frames = 0;
+        }
+    }
+    if (dt > 0.05) {
+        dt = 0.05;
+    }
+
+    const uint8_t *keys = SDL_GetKeyboardState(NULL);
+    double forward = 0.0;
+    double strafe = 0.0;
+    double turn = 0.0;
+
+    if (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) forward += 1.0;
+    if (keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN]) forward -= 1.0;
+    if (keys[SDL_SCANCODE_Q]) strafe -= 1.0;
+    if (keys[SDL_SCANCODE_E]) strafe += 1.0;
+    if (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]) turn -= 1.0;
+    if (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) turn += 1.0;
+
+    if (!rt->paused && !rt->game.game_over && !rt->game.victory && (forward != 0.0 || strafe != 0.0)) {
+        move_camera(&rt->cam, &rt->game, forward, strafe, dt);
+    }
+    if (!rt->paused && !rt->game.game_over && !rt->game.victory && turn != 0.0) {
+        rotate_camera(&rt->cam, turn * 2.2 * dt);
+    }
+
+    if (!rt->paused && !rt->game.game_over && !rt->game.victory) {
+        update_items(&rt->game, &rt->cam);
+        update_game(&rt->game, &rt->cam, dt);
+    }
+    render_quality = rt->render_quality;
+    active_profile = rt->show_timings ? &rt->profile : NULL;
+    render_scene(&rt->cam, &rt->game);
+    active_profile = NULL;
+    render_quality = RENDER_QUALITY_PBR;
+    if (rt->paused) {
+        render_pause_overlay();
+    }
+    if (rt->show_fps) {
+        render_fps_overlay(rt->fps_value, rt->frame_ms, rt->render_quality);
+    }
+    if (rt->show_timings) {
+        render_timing_overlay(&rt->profile);
+    }
+    SDL_UpdateTexture(rt->screen, NULL, framebuffer, SCREEN_W * (int)sizeof(uint32_t));
+
+    SDL_RenderClear(rt->renderer);
+    SDL_RenderCopy(rt->renderer, rt->screen, NULL, NULL);
+    SDL_RenderPresent(rt->renderer);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "--dump") == 0) {
@@ -5941,185 +7109,18 @@ int main(int argc, char **argv)
         return dump_forest_forward_frames(argv[2]);
     }
 
-    if (!init_assets()) {
+    static Runtime rt;
+    if (!init_runtime(&rt)) {
         return 1;
     }
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0) {
-        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
-        return 1;
+#ifdef __EMSCRIPTEN__
+    emscripten_set_main_loop_arg(runtime_frame, &rt, 0, 1);
+#else
+    while (rt.running) {
+        runtime_frame(&rt);
     }
-    if (!init_audio()) {
-        SDL_Quit();
-        return 1;
-    }
-
-    SDL_Window *window = SDL_CreateWindow(
-        "Software Raycaster",
-        SDL_WINDOWPOS_CENTERED,
-        SDL_WINDOWPOS_CENTERED,
-        SCREEN_W * WINDOW_SCALE,
-        SCREEN_H * WINDOW_SCALE,
-        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-    if (!window) {
-        fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
-        shutdown_audio();
-        SDL_Quit();
-        return 1;
-    }
-
-    SDL_Renderer *renderer = SDL_CreateRenderer(
-        window,
-        -1,
-        SDL_RENDERER_SOFTWARE | SDL_RENDERER_PRESENTVSYNC);
-    if (!renderer) {
-        fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
-        SDL_DestroyWindow(window);
-        shutdown_audio();
-        SDL_Quit();
-        return 1;
-    }
-    SDL_RenderSetLogicalSize(renderer, SCREEN_W, SCREEN_H);
-
-    SDL_Texture *screen = SDL_CreateTexture(
-        renderer,
-        SDL_PIXELFORMAT_ARGB8888,
-        SDL_TEXTUREACCESS_STREAMING,
-        SCREEN_W,
-        SCREEN_H);
-    if (!screen) {
-        fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        shutdown_audio();
-        SDL_Quit();
-        return 1;
-    }
-
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
-
-    Camera cam;
-    GameState game;
-    runtime_level_seed = LEVEL_TEST_SEED ^ (uint32_t)SDL_GetTicks() ^ (uint32_t)SDL_GetPerformanceCounter();
-    reset_run(&game, &cam);
-
-    int running = 1;
-    int paused = 0;
-    int fullscreen = 0;
-    uint64_t prev = SDL_GetPerformanceCounter();
-
-    while (running) {
-        SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT) {
-                running = 0;
-            } else if (event.type == SDL_KEYDOWN) {
-                int help_closed = close_help_on_key(&game);
-                SDL_Keycode key = event.key.keysym.sym;
-                if (key == SDLK_ESCAPE) {
-                    running = 0;
-                } else if (key == SDLK_1) {
-                    select_weapon(&game, WEAPON_KNIFE);
-                } else if (key == SDLK_2) {
-                    select_weapon(&game, WEAPON_PISTOL);
-                } else if (key == SDLK_3 && event.key.repeat == 0) {
-                    select_weapon(&game, WEAPON_FIREBALL);
-                } else if (key == SDLK_4 && event.key.repeat == 0) {
-                    runtime_level_mode = GENERATOR_ROOMS;
-                    reset_run(&game, &cam);
-                    paused = 0;
-                } else if (key == SDLK_5 && event.key.repeat == 0) {
-                    runtime_level_mode = GENERATOR_TIGHT;
-                    reset_run(&game, &cam);
-                    paused = 0;
-                } else if (key == SDLK_6 && event.key.repeat == 0) {
-                    runtime_level_mode = GENERATOR_BOSS;
-                    reset_run(&game, &cam);
-                    paused = 0;
-                } else if (key == SDLK_7 && event.key.repeat == 0) {
-                    runtime_level_mode = GENERATOR_FOREST;
-                    reset_run(&game, &cam);
-                    paused = 0;
-                } else if (key == SDLK_SPACE) {
-                    if (!paused) {
-                        player_fire(&game, &cam);
-                    }
-                } else if (key == SDLK_f) {
-                    if (!paused) {
-                        interact_world(&game, &cam);
-                    }
-                } else if (key == SDLK_TAB && event.key.repeat == 0) {
-                    game.show_automap = !game.show_automap;
-                } else if (key == SDLK_h && event.key.repeat == 0) {
-                    if (!help_closed) {
-                        game.show_help = 1;
-                        game.help_timer = 0.0;
-                    }
-                } else if (key == SDLK_p && event.key.repeat == 0) {
-                    paused = !paused;
-                } else if (key == SDLK_r && event.key.repeat == 0) {
-                    reset_run(&game, &cam);
-                    paused = 0;
-                } else if (key == SDLK_F11 && event.key.repeat == 0) {
-                    fullscreen = !fullscreen;
-                    if (SDL_SetWindowFullscreen(window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {
-                        fprintf(stderr, "SDL_SetWindowFullscreen failed: %s\n", SDL_GetError());
-                        running = 0;
-                    }
-                }
-            } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
-                if (!paused) {
-                    player_fire(&game, &cam);
-                }
-            }
-        }
-
-        uint64_t now = SDL_GetPerformanceCounter();
-        double dt = (double)(now - prev) / (double)SDL_GetPerformanceFrequency();
-        prev = now;
-        if (dt > 0.05) {
-            dt = 0.05;
-        }
-
-        const uint8_t *keys = SDL_GetKeyboardState(NULL);
-        double forward = 0.0;
-        double strafe = 0.0;
-        double turn = 0.0;
-
-        if (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) forward += 1.0;
-        if (keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN]) forward -= 1.0;
-        if (keys[SDL_SCANCODE_Q]) strafe -= 1.0;
-        if (keys[SDL_SCANCODE_E]) strafe += 1.0;
-        if (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]) turn -= 1.0;
-        if (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) turn += 1.0;
-
-        if (!paused && !game.game_over && !game.victory && (forward != 0.0 || strafe != 0.0)) {
-            move_camera(&cam, &game, forward, strafe, dt);
-        }
-        if (!paused && !game.game_over && !game.victory && turn != 0.0) {
-            rotate_camera(&cam, turn * 2.2 * dt);
-        }
-
-        if (!paused && !game.game_over && !game.victory) {
-            update_items(&game, &cam);
-            update_game(&game, &cam, dt);
-        }
-        render_scene(&cam, &game);
-        if (paused) {
-            render_pause_overlay();
-        }
-        SDL_UpdateTexture(screen, NULL, framebuffer, SCREEN_W * (int)sizeof(uint32_t));
-
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, screen, NULL, NULL);
-        SDL_RenderPresent(renderer);
-    }
-
-    SDL_DestroyTexture(screen);
-    shutdown_audio();
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
+#endif
 
     return 0;
 }
