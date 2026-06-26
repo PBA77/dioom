@@ -24,7 +24,7 @@ Render ma eksperymentalną mgłę wolumetryczną: dystansowy fog na ścianach, p
 
 Na ścianach są pochodnie renderowane jako softwareowe sprite'y z poświatą. Ich ciepłe światło wpływa lokalnie na ściany, podłogę, sufit i wolumetryczną mgłę, a same pochodnie są sortowane i zasłaniane przez kolumnowy `z_buffer`. Wewnętrzne korytarze mają dodatkowe pochodnie, więc mrok zostaje, ale mapa nie ma długich martwych czarnych odcinków.
 
-Render ma dodatkowe softwareowe passy: light buffer/pseudo-deferred composite, bloom z blur buforem, proceduralny bump/normal lighting ścian, dynamiczne cienie pod sprite'ami, scorch decale po eksplozjach, soft particles dla dymu/iskier i końcowy color grading z vignette.
+Render ma dodatkowe softwareowe passy: light buffer/pseudo-deferred composite, bloom z blur buforem, threshold bloom dla jasnych pikseli, selektywny edge antialiasing, proceduralny bump/normal lighting ścian, dynamiczne cienie pod sprite'ami, scorch decale po eksplozjach, soft particles dla dymu/iskier i końcowy color grading z vignette. Cięższe passy post-processingu są przełączane przez `--effects full` albo `F6`.
 
 ## Build
 
@@ -52,8 +52,10 @@ SDL2_PREFIX=/opt/homebrew/opt/sdl2 make
 - `Tab`: pełna automapa
 - `P`: pauza
 - `R`: restart runu
+- `F3/F4/F5/F6`: FPS / timing / jakość renderu / post-processing
 - `F11`: fullscreen
-- `Esc`: wyjście
+- `Esc`: menu gry
+- Menu: `W/S` albo strzałki wybierają pozycję, `Enter`/`Spacja` zatwierdza, `A/D` zmienia trudność, jakość, post-processing i fullscreen; zawiera też restart runu
 
 ## Render test
 

@@ -22,7 +22,13 @@
 #define WINDOW_SCALE 2
 #endif
 #define TEX_SIZE 64
-#define TEX_COUNT 8
+#define TEX_ATLAS_COLS 4
+#define TEX_COUNT 10
+#define TEX_ATLAS_ROWS ((TEX_COUNT + TEX_ATLAS_COLS - 1) / TEX_ATLAS_COLS)
+#define WALL_DOOR 8
+#define WALL_LOCKED_DOOR 9
+#define TEX_DOOR 8
+#define TEX_LOCKED_DOOR 9
 #define SPRITE_SIZE 64
 #define GIANT_SKELETON_SPRITE_SIZE 128
 #define SPRITE_FRAMES 4
@@ -44,6 +50,9 @@
 #define MAX_WALL_DECALS 64
 #define MAX_PARTICLES 64
 #define MAX_TREES 96
+#define TREE_COLLISION_RADIUS 0.46
+#define TREE_RENDER_NEAR_CLIP 0.30
+#define DOOR_OPEN_SPEED 1.45
 #define MAX_DOORS 4
 #define MAX_SECRETS 3
 #define MAX_PORTALS 5
@@ -196,12 +205,23 @@ enum {
     RENDER_EFFECTS_OFF = 1,
 };
 
+enum {
+    DIFFICULTY_EASY = 0,
+    DIFFICULTY_NORMAL,
+    DIFFICULTY_HARD,
+    DIFFICULTY_COUNT
+};
+
 #ifndef DEFAULT_RENDER_QUALITY
 #define DEFAULT_RENDER_QUALITY RENDER_QUALITY_FAST
 #endif
 
 #ifndef DEFAULT_RENDER_EFFECTS
 #define DEFAULT_RENDER_EFFECTS RENDER_EFFECTS_OFF
+#endif
+
+#ifndef DEFAULT_DIFFICULTY
+#define DEFAULT_DIFFICULTY DIFFICULTY_NORMAL
 #endif
 
 typedef struct {
@@ -355,6 +375,7 @@ typedef struct {
     int game_over;
     int show_automap;
     int generator_mode;
+    int difficulty;
     int in_dungeon;
     int relic_mask;
     int relic_count;
@@ -374,6 +395,79 @@ typedef struct {
     int map[MAP_H][MAP_W];
     Torch torches[MAX_TORCHES];
 } SavedLevel;
+
+static int normalize_difficulty(int difficulty)
+{
+    if (difficulty < 0 || difficulty >= DIFFICULTY_COUNT) {
+        return DIFFICULTY_NORMAL;
+    }
+    return difficulty;
+}
+
+static const char *difficulty_menu_text(int difficulty)
+{
+    switch (normalize_difficulty(difficulty)) {
+    case DIFFICULTY_EASY:
+        return "TRUDNOSC LATWY";
+    case DIFFICULTY_HARD:
+        return "TRUDNOSC TRUDNY";
+    default:
+        return "TRUDNOSC NORMAL";
+    }
+}
+
+static int adjust_difficulty(int difficulty, int delta)
+{
+    difficulty = normalize_difficulty(difficulty);
+    difficulty = (difficulty + delta) % DIFFICULTY_COUNT;
+    if (difficulty < 0) {
+        difficulty += DIFFICULTY_COUNT;
+    }
+    return difficulty;
+}
+
+static int scale_monster_hp_for_difficulty(int hp, int difficulty)
+{
+    double scale = 1.0;
+    switch (normalize_difficulty(difficulty)) {
+    case DIFFICULTY_EASY:
+        scale = 0.75;
+        break;
+    case DIFFICULTY_HARD:
+        scale = 1.35;
+        break;
+    default:
+        break;
+    }
+    int scaled = (int)(hp * scale + 0.5);
+    return scaled > 0 ? scaled : 1;
+}
+
+static int scale_enemy_damage_for_difficulty(const GameState *game, int damage)
+{
+    double scale = 1.0;
+    switch (normalize_difficulty(game ? game->difficulty : DIFFICULTY_NORMAL)) {
+    case DIFFICULTY_EASY:
+        scale = 0.70;
+        break;
+    case DIFFICULTY_HARD:
+        scale = 1.35;
+        break;
+    default:
+        break;
+    }
+    int scaled = (int)(damage * scale + 0.5);
+    return scaled > 0 ? scaled : 1;
+}
+
+static void apply_player_damage(GameState *game, int damage)
+{
+    game->player_health -= scale_enemy_damage_for_difficulty(game, damage);
+    if (game->player_health <= 0) {
+        game->player_health = 0;
+        game->game_over = 1;
+    }
+}
 
 typedef struct {
     int kind;
@@ -420,6 +514,8 @@ static const Material texture_materials[TEX_COUNT] = {
     {0.86, 0.00, 0.38, 0.54},
     {0.72, 0.00, 0.20, 0.48},
     {0.80, 0.00, 0.28, 0.56},
+    {0.68, 0.00, 0.18, 0.60},
+    {0.62, 0.02, 0.12, 0.66},
 };
 static uint32_t monster_sprites[MONSTER_TYPES][SPRITE_FRAMES][SPRITE_SIZE * SPRITE_SIZE];
 static uint32_t giant_skeleton_sprites[SPRITE_FRAMES][GIANT_SKELETON_SPRITE_SIZE * GIANT_SKELETON_SPRITE_SIZE];
@@ -433,7 +529,10 @@ static double z_buffer[SCREEN_W];
 static double depth_buffer[SCREEN_W * SCREEN_H];
 static double glow_buffer[SCREEN_W * SCREEN_H];
 static double glow_blur_buffer[SCREEN_W * SCREEN_H];
+static double bloom_work_buffer[SCREEN_W * SCREEN_H];
 static double light_buffer[SCREEN_W * SCREEN_H];
+static uint32_t post_buffer[SCREEN_W * SCREEN_H];
+static double post_luma_buffer[SCREEN_W * (SCREEN_H - 14)];
 static double vignette_buffer[SCREEN_W * (SCREEN_H - 14)];
 static int vignette_ready = 0;
 static double fog_lut[FOG_LUT_SIZE + 1];
@@ -456,6 +555,7 @@ static double moon_visibility_cache[MAP_H][MAP_W];
 static int moon_visibility_cache_ready = 0;
 static uint32_t runtime_level_seed = LEVEL_TEST_SEED;
 static int runtime_level_mode = GENERATOR_FOREST;
+static int runtime_difficulty = DEFAULT_DIFFICULTY;
 static SavedLevel saved_forest;
 
 static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b)
@@ -911,8 +1011,8 @@ static int load_texture_atlas(const char *path)
              ppm_next_int(f, &width) &&
              ppm_next_int(f, &height) &&
              ppm_next_int(f, &max_value) &&
-             width == TEX_SIZE * 4 &&
-             height == TEX_SIZE * 2 &&
+             width == TEX_SIZE * TEX_ATLAS_COLS &&
+             height == TEX_SIZE * TEX_ATLAS_ROWS &&
              max_value == 255;
 
     int sep = fgetc(f);
@@ -935,8 +1035,8 @@ static int load_texture_atlas(const char *path)
     }
 
     for (int tex = 0; tex < TEX_COUNT; ++tex) {
-        int tile_x = (tex % 4) * TEX_SIZE;
-        int tile_y = (tex / 4) * TEX_SIZE;
+        int tile_x = (tex % TEX_ATLAS_COLS) * TEX_SIZE;
+        int tile_y = (tex / TEX_ATLAS_COLS) * TEX_SIZE;
 
         for (int y = 0; y < TEX_SIZE; ++y) {
             for (int x = 0; x < TEX_SIZE; ++x) {
@@ -1481,17 +1581,29 @@ static int init_assets(void)
     return 1;
 }
 
+static const Door *door_at_tile(const GameState *game, int x, int y)
+{
+    if (!game) {
+        return NULL;
+    }
+    for (int i = 0; i < MAX_DOORS; ++i) {
+        const Door *door = &game->doors[i];
+        if (door->x == x && door->y == y) {
+            return door;
+        }
+    }
+    return NULL;
+}
+
 static int map_at(int x, int y)
 {
     if (x < 0 || x >= MAP_W || y < 0 || y >= MAP_H) {
         return 1;
     }
     if (active_game) {
-        for (int i = 0; i < MAX_DOORS; ++i) {
-            const Door *door = &active_game->doors[i];
-            if (door->x == x && door->y == y && !door->open) {
-                return door->locked ? 8 : 7;
-            }
+        const Door *door = door_at_tile(active_game, x, y);
+        if (door && !door->open) {
+            return door->locked ? WALL_LOCKED_DOOR : WALL_DOOR;
         }
         for (int i = 0; i < MAX_SECRETS; ++i) {
             const Secret *secret = &active_game->secrets[i];
@@ -1501,6 +1613,47 @@ static int map_at(int x, int y)
         }
     }
     return level_map[y][x];
+}
+
+static int is_door_wall(int wall)
+{
+    return wall == WALL_DOOR || wall == WALL_LOCKED_DOOR;
+}
+
+static int wall_texture_index(int wall)
+{
+    if (wall == WALL_DOOR) {
+        return TEX_DOOR;
+    }
+    if (wall == WALL_LOCKED_DOOR) {
+        return TEX_LOCKED_DOOR;
+    }
+    int tex_idx = wall - 1;
+    if (tex_idx < 0) {
+        tex_idx = 0;
+    }
+    return tex_idx % TEX_COUNT;
+}
+
+static double ray_wall_u(const Camera *cam, double ray_dir_x, double ray_dir_y, double perp_wall_dist, int side)
+{
+    double wall_x = side == 0
+        ? cam->pos.y + perp_wall_dist * ray_dir_y
+        : cam->pos.x + perp_wall_dist * ray_dir_x;
+    wall_x -= floor(wall_x);
+
+    if ((side == 0 && ray_dir_x > 0.0) || (side == 1 && ray_dir_y < 0.0)) {
+        wall_x = 1.0 - wall_x;
+    }
+    return wall_x;
+}
+
+static int ray_hits_opening_door(const Door *door, double wall_u)
+{
+    if (!door || !door->opening || door->locked) {
+        return 1;
+    }
+    return wall_u >= clamp01(door->open_amount);
 }
 
 static void prepare_torch_flicker_cache(double time)
@@ -2245,7 +2398,7 @@ static void render_tree(const Camera *cam, const GameState *game, const Tree *tr
     if (!project_sprite(cam, tree->pos, tree_scale, &sprite_screen_x, &sprite_h, &depth)) {
         return;
     }
-    if (depth < 0.82) {
+    if (depth < TREE_RENDER_NEAR_CLIP) {
         return;
     }
 
@@ -2681,41 +2834,104 @@ static void render_volumetric_fog(const Camera *cam, const GameState *game)
 
 static void render_bloom(void)
 {
-    for (int y = 1; y < SCREEN_H - 15; ++y) {
-        for (int x = 1; x < SCREEN_W - 1; ++x) {
+    int limit_y = SCREEN_H - 14;
+    for (int y = 0; y < limit_y; ++y) {
+        for (int x = 0; x < SCREEN_W; ++x) {
             int idx = y * SCREEN_W + x;
-            double s =
-                glow_buffer[idx] * 0.34 +
-                glow_buffer[idx - 1] * 0.12 +
-                glow_buffer[idx + 1] * 0.12 +
-                glow_buffer[idx - SCREEN_W] * 0.12 +
-                glow_buffer[idx + SCREEN_W] * 0.12 +
-                glow_buffer[idx - SCREEN_W - 1] * 0.045 +
-                glow_buffer[idx - SCREEN_W + 1] * 0.045 +
-                glow_buffer[idx + SCREEN_W - 1] * 0.045 +
-                glow_buffer[idx + SCREEN_W + 1] * 0.045;
-            glow_blur_buffer[idx] = s;
+            double bright = smooth01((luminance(framebuffer[idx]) - 0.62) / 0.30) * 0.22;
+            glow_blur_buffer[idx] = glow_buffer[idx] + bright;
+            bloom_work_buffer[idx] = 0.0;
         }
     }
 
-    for (int y = 2; y < SCREEN_H - 16; ++y) {
-        for (int x = 2; x < SCREEN_W - 2; ++x) {
+    for (int y = 1; y < limit_y - 1; ++y) {
+        for (int x = 1; x < SCREEN_W - 1; ++x) {
             int idx = y * SCREEN_W + x;
             double s =
-                glow_blur_buffer[idx] * 0.36 +
-                glow_blur_buffer[idx - 2] * 0.08 +
-                glow_blur_buffer[idx + 2] * 0.08 +
-                glow_blur_buffer[idx - SCREEN_W * 2] * 0.08 +
-                glow_blur_buffer[idx + SCREEN_W * 2] * 0.08 +
-                glow_blur_buffer[idx - 1] * 0.08 +
-                glow_blur_buffer[idx + 1] * 0.08 +
-                glow_blur_buffer[idx - SCREEN_W] * 0.08 +
-                glow_blur_buffer[idx + SCREEN_W] * 0.08;
+                glow_blur_buffer[idx] * 0.34 +
+                glow_blur_buffer[idx - 1] * 0.12 +
+                glow_blur_buffer[idx + 1] * 0.12 +
+                glow_blur_buffer[idx - SCREEN_W] * 0.12 +
+                glow_blur_buffer[idx + SCREEN_W] * 0.12 +
+                glow_blur_buffer[idx - SCREEN_W - 1] * 0.045 +
+                glow_blur_buffer[idx - SCREEN_W + 1] * 0.045 +
+                glow_blur_buffer[idx + SCREEN_W - 1] * 0.045 +
+                glow_blur_buffer[idx + SCREEN_W + 1] * 0.045;
+            bloom_work_buffer[idx] = s;
+        }
+    }
+
+    for (int y = 3; y < limit_y - 3; ++y) {
+        for (int x = 3; x < SCREEN_W - 3; ++x) {
+            int idx = y * SCREEN_W + x;
+            double s =
+                bloom_work_buffer[idx] * 0.36 +
+                bloom_work_buffer[idx - 2] * 0.08 +
+                bloom_work_buffer[idx + 2] * 0.08 +
+                bloom_work_buffer[idx - SCREEN_W * 2] * 0.08 +
+                bloom_work_buffer[idx + SCREEN_W * 2] * 0.08 +
+                bloom_work_buffer[idx - 1] * 0.08 +
+                bloom_work_buffer[idx + 1] * 0.08 +
+                bloom_work_buffer[idx - SCREEN_W] * 0.08 +
+                bloom_work_buffer[idx + SCREEN_W] * 0.08;
             if (s > 0.004) {
-                framebuffer[idx] = add_color(framebuffer[idx], rgb(255, 122, 40), s * 0.55);
+                uint32_t bloom_tint = mix_color(rgb(255, 122, 40), framebuffer[idx], 0.38);
+                framebuffer[idx] = add_color(framebuffer[idx], bloom_tint, s * 0.50);
             }
         }
     }
+}
+
+static void render_edge_antialias(void)
+{
+    int pixels = SCREEN_W * (SCREEN_H - 14);
+    for (int i = 0; i < pixels; ++i) {
+        post_buffer[i] = framebuffer[i];
+        post_luma_buffer[i] = luminance(framebuffer[i]);
+    }
+
+    for (int y = 1; y < SCREEN_H - 15; ++y) {
+        for (int x = 1; x < SCREEN_W - 1; ++x) {
+            int idx = y * SCREEN_W + x;
+            uint32_t c = framebuffer[idx];
+            double lc = post_luma_buffer[idx];
+            double ll = post_luma_buffer[idx - 1];
+            double lr = post_luma_buffer[idx + 1];
+            double lu = post_luma_buffer[idx - SCREEN_W];
+            double ld = post_luma_buffer[idx + SCREEN_W];
+            double lmin = lc;
+            double lmax = lc;
+            if (ll < lmin) lmin = ll;
+            if (lr < lmin) lmin = lr;
+            if (lu < lmin) lmin = lu;
+            if (ld < lmin) lmin = ld;
+            if (ll > lmax) lmax = ll;
+            if (lr > lmax) lmax = lr;
+            if (lu > lmax) lmax = lu;
+            if (ld > lmax) lmax = ld;
+
+            double contrast = lmax - lmin;
+            if (contrast < 0.11) {
+                continue;
+            }
+            if (lc > 0.84 && contrast > 0.45) {
+                continue;
+            }
+
+            double horizontal_delta = fabs(ll - lr);
+            double vertical_delta = fabs(lu - ld);
+            uint32_t target = horizontal_delta < vertical_delta
+                ? mix_color(framebuffer[idx - 1], framebuffer[idx + 1], 0.5)
+                : mix_color(framebuffer[idx - SCREEN_W], framebuffer[idx + SCREEN_W], 0.5);
+            double amount = clamp01((contrast - 0.11) * 1.45);
+            if (amount > 0.34) {
+                amount = 0.34;
+            }
+            post_buffer[idx] = mix_color(c, target, amount);
+        }
+    }
+
+    memcpy(framebuffer, post_buffer, (size_t)pixels * sizeof(framebuffer[0]));
 }
 
 static void render_light_buffer(void)
@@ -2993,7 +3209,11 @@ static void render_minimap(const Camera *cam, const GameState *game)
             if (game->discovered[y][x]) {
                 int wall = map_at(x, y);
                 c = wall ? rgb(80, 62, 54) : rgb(34, 34, 32);
-                if (wall >= 5) {
+                if (wall == WALL_DOOR) {
+                    c = rgb(126, 82, 40);
+                } else if (wall == WALL_LOCKED_DOOR) {
+                    c = rgb(132, 102, 34);
+                } else if (wall >= 5) {
                     c = rgb(70, 48, 66);
                 }
             }
@@ -3058,8 +3278,8 @@ static void render_full_automap(const Camera *cam, const GameState *game)
             if (game->discovered[y][x]) {
                 int wall = map_at(x, y);
                 c = wall ? rgb(88, 70, 58) : rgb(28, 28, 25);
-                if (wall == 7) c = rgb(126, 82, 40);
-                if (wall == 8) c = rgb(132, 102, 34);
+                if (wall == WALL_DOOR) c = rgb(126, 82, 40);
+                if (wall == WALL_LOCKED_DOOR) c = rgb(132, 102, 34);
                 if (wall == 6) c = rgb(66, 50, 72);
             }
             fill_rect(ox + x * cell, oy + y * cell, cell - 1, cell - 1, c);
@@ -3189,6 +3409,9 @@ static void render_dynamic_shadows(const Camera *cam, const GameState *game)
 
 static void render_decals(const Camera *cam, const GameState *game)
 {
+    const double horizon = SCREEN_H * 0.5;
+    const double pos_z = SCREEN_H * 0.5;
+
     for (int i = 0; i < MAX_DECALS; ++i) {
         const Decal *decal = &game->decals[i];
         if (!decal->active) {
@@ -3201,24 +3424,26 @@ static void render_decals(const Camera *cam, const GameState *game)
             continue;
         }
 
-        int base_h = (int)(sh / decal->radius);
-        if (base_h < 1) {
-            base_h = 1;
-        }
-        int decal_w = sh;
-        int decal_h = sh / 3 + 1;
-        if (decal_w < 2 || decal_h < 2) {
+        int screen_radius = sh / 2 + 4;
+        if (screen_radius < 2) {
             continue;
         }
-        int center_y = SCREEN_H / 2 + base_h / 2;
-        int start_x = sx - decal_w / 2;
-        int end_x = sx + decal_w / 2;
-        int start_y = center_y - decal_h / 2;
-        int end_y = center_y + decal_h / 2;
+        if (screen_radius > SCREEN_W) {
+            screen_radius = SCREEN_W;
+        }
+
+        int center_y = (int)(horizon + pos_z / depth);
+        int start_x = sx - screen_radius;
+        int end_x = sx + screen_radius;
+        int start_y = center_y - screen_radius;
+        int end_y = center_y + screen_radius;
         if (start_x < 0) start_x = 0;
         if (end_x >= SCREEN_W) end_x = SCREEN_W - 1;
-        if (start_y < 0) start_y = 0;
+        if (start_y <= (int)horizon) start_y = (int)horizon + 1;
         if (end_y >= SCREEN_H - 14) end_y = SCREEN_H - 15;
+        if (start_y > end_y || start_x > end_x) {
+            continue;
+        }
 
         int variant = decal->variant % DECAL_COUNT;
         if (variant < 0) {
@@ -3227,15 +3452,25 @@ static void render_decals(const Camera *cam, const GameState *game)
         double fade = decal->max_life > 0.0 ? clamp01(decal->life / decal->max_life) : clamp01(decal->life / 30.0);
         double ca = cos(decal->angle);
         double sa = sin(decal->angle);
+        double half_extent = decal->radius * 0.5;
+        if (half_extent < 0.04) {
+            half_extent = 0.04;
+        }
         for (int y = start_y; y <= end_y; ++y) {
-            double ny = (y - center_y) / (double)(decal_h / 2 + 1);
+            double row_distance = pos_z / (y - horizon);
             for (int x = start_x; x <= end_x; ++x) {
-                if (depth >= z_buffer[x] + 0.08) {
+                if (row_distance >= z_buffer[x] + 0.08) {
                     continue;
                 }
-                double nx = (x - sx) / (double)(decal_w / 2 + 1);
-                double rx = nx * ca - ny * sa;
-                double ry = nx * sa + ny * ca;
+                double camera_x = 2.0 * x / (double)SCREEN_W - 1.0;
+                double ray_dir_x = cam->dir.x + cam->plane.x * camera_x;
+                double ray_dir_y = cam->dir.y + cam->plane.y * camera_x;
+                double world_x = cam->pos.x + row_distance * ray_dir_x;
+                double world_y = cam->pos.y + row_distance * ray_dir_y;
+                double dx = world_x - decal->pos.x;
+                double dy = world_y - decal->pos.y;
+                double rx = (dx * ca + dy * sa) / half_extent;
+                double ry = (-dx * sa + dy * ca) / half_extent;
                 int tx = (int)((rx * 0.5 + 0.5) * DECAL_SIZE);
                 int ty = (int)((ry * 0.5 + 0.5) * DECAL_SIZE);
                 if (tx < 0 || tx >= DECAL_SIZE || ty < 0 || ty >= DECAL_SIZE) {
@@ -3247,7 +3482,7 @@ static void render_decals(const Camera *cam, const GameState *game)
                 }
                 int idx = y * SCREEN_W + x;
                 double amount = (0.48 + 0.28 * luminance(color)) * fade;
-                framebuffer[idx] = mix_color(framebuffer[idx], apply_fog(color, depth, 0.58), clamp01(amount));
+                framebuffer[idx] = mix_color(framebuffer[idx], apply_fog(color, row_distance, 0.58), clamp01(amount));
             }
         }
     }
@@ -3400,7 +3635,21 @@ static void render_scene(const Camera *cam, const GameState *game)
             }
 
             wall = map_at(map_x, map_y);
-            hit = wall > 0;
+            if (wall > 0) {
+                const Door *door = is_door_wall(wall) ? door_at_tile(game, map_x, map_y) : NULL;
+                if (door && door->opening) {
+                    double door_dist = side == 0
+                        ? (side_dist_x - delta_dist_x)
+                        : (side_dist_y - delta_dist_y);
+                    if (door_dist < 0.001) {
+                        door_dist = 0.001;
+                    }
+                    if (!ray_hits_opening_door(door, ray_wall_u(cam, ray_dir_x, ray_dir_y, door_dist, side))) {
+                        continue;
+                    }
+                }
+                hit = 1;
+            }
         }
 
         double perp_wall_dist = side == 0
@@ -3416,18 +3665,10 @@ static void render_scene(const Camera *cam, const GameState *game)
         if (draw_start < 0) draw_start = 0;
         if (draw_end >= SCREEN_H) draw_end = SCREEN_H - 1;
 
-        double wall_x = side == 0
-            ? cam->pos.y + perp_wall_dist * ray_dir_y
-            : cam->pos.x + perp_wall_dist * ray_dir_x;
-        wall_x -= floor(wall_x);
-
         double hit_x = cam->pos.x + ray_dir_x * perp_wall_dist;
         double hit_y = cam->pos.y + ray_dir_y * perp_wall_dist;
 
-        double wall_u = wall_x;
-        if ((side == 0 && ray_dir_x > 0.0) || (side == 1 && ray_dir_y < 0.0)) {
-            wall_u = 1.0 - wall_u;
-        }
+        double wall_u = ray_wall_u(cam, ray_dir_x, ray_dir_y, perp_wall_dist, side);
         double tex_u = wall_u;
         if (game->generator_mode == GENERATOR_FOREST) {
             double world_u = side == 0 ? hit_y : hit_x;
@@ -3440,7 +3681,7 @@ static void render_scene(const Camera *cam, const GameState *game)
             tex_x = TEX_SIZE - wall_tex_gutter - 1;
         }
 
-        int tex_idx = (wall - 1) % TEX_COUNT;
+        int tex_idx = wall_texture_index(wall);
         if (game->generator_mode == GENERATOR_FOREST) {
             tex_idx = 4;
         }
@@ -3507,7 +3748,9 @@ static void render_scene(const Camera *cam, const GameState *game)
             if (game->generator_mode == GENERATOR_FOREST) {
                 lit = mix_color(lit, rgb(106, 136, 120), moon_light * 0.13);
             }
-            lit = apply_wall_decals(game, map_x, map_y, side, wall_u, (tex_y + 0.5) / TEX_SIZE, lit);
+            if (wall != WALL_DOOR && wall != WALL_LOCKED_DOOR) {
+                lit = apply_wall_decals(game, map_x, map_y, side, wall_u, (tex_y + 0.5) / TEX_SIZE, lit);
+            }
             framebuffer[y * SCREEN_W + x] = apply_game_fog(game, lit, perp_wall_dist, game->generator_mode == GENERATOR_FOREST ? 1.22 : 1.0);
             depth_buffer[y * SCREEN_W + x] = perp_wall_dist;
             add_light(x, y, torch_light * 0.10 + player_light * 0.05);
@@ -3549,6 +3792,7 @@ static void render_scene(const Camera *cam, const GameState *game)
     }
 
     if (render_effects == RENDER_EFFECTS_FULL) {
+        render_edge_antialias();
         render_color_grade(game);
     }
     render_hit_flash(game);
@@ -4073,6 +4317,78 @@ static int occupied_spawn_tile(const GameState *game, int x, int y)
     return 0;
 }
 
+static int dungeon_route_tile(const GameState *game, int x, int y)
+{
+    if (x <= 0 || x >= MAP_W - 1 || y <= 0 || y >= MAP_H - 1) {
+        return 0;
+    }
+    for (int i = 0; i < MAX_DOORS; ++i) {
+        if (game->doors[i].x == x && game->doors[i].y == y) {
+            return !game->doors[i].locked;
+        }
+    }
+    for (int i = 0; i < MAX_SECRETS; ++i) {
+        if (game->secrets[i].x == x && game->secrets[i].y == y) {
+            return 1;
+        }
+    }
+    if (level_map[y][x] == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+static void mark_dungeon_reachable_tiles(const GameState *game, unsigned char reachable[MAP_H][MAP_W])
+{
+    int qx[MAP_W * MAP_H];
+    int qy[MAP_W * MAP_H];
+    int head = 0;
+    int tail = 0;
+    memset(reachable, 0, MAP_W * MAP_H);
+
+    int sx = 2;
+    int sy = 22;
+    if (!dungeon_route_tile(game, sx, sy)) {
+        return;
+    }
+
+    reachable[sy][sx] = 1;
+    qx[tail] = sx;
+    qy[tail] = sy;
+    tail++;
+
+    while (head < tail) {
+        int x = qx[head];
+        int y = qy[head];
+        head++;
+        static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        for (int i = 0; i < 4; ++i) {
+            int nx = x + dirs[i][0];
+            int ny = y + dirs[i][1];
+            if (nx <= 0 || nx >= MAP_W - 1 || ny <= 0 || ny >= MAP_H - 1 || reachable[ny][nx]) {
+                continue;
+            }
+            if (!dungeon_route_tile(game, nx, ny)) {
+                continue;
+            }
+            reachable[ny][nx] = 1;
+            qx[tail] = nx;
+            qy[tail] = ny;
+            tail++;
+        }
+    }
+}
+
+static int dungeon_tile_reachable_from_entrance(const GameState *game, int x, int y)
+{
+    unsigned char reachable[MAP_H][MAP_W];
+    if (x <= 0 || x >= MAP_W - 1 || y <= 0 || y >= MAP_H - 1) {
+        return 0;
+    }
+    mark_dungeon_reachable_tiles(game, reachable);
+    return reachable[y][x] != 0;
+}
+
 static Vec2 pick_floor_spot(LevelRng *rng, const GameState *game, double min_dist2)
 {
     Vec2 best = {2.5, 22.5};
@@ -4346,7 +4662,7 @@ static void place_relic_guardian(GameState *game, Vec2 relic_pos)
         .active = 1,
         .pos = pos,
         .facing = {0.0, -1.0},
-        .hp = monster_max_hp(MONSTER_GIANT_SKELETON),
+        .hp = scale_monster_hp_for_difficulty(monster_max_hp(MONSTER_GIANT_SKELETON), game->difficulty),
         .type = MONSTER_GIANT_SKELETON,
         .shoot_timer = 0.8,
         .target_waypoint = 1,
@@ -4366,11 +4682,13 @@ static void place_dungeon_relic(GameState *game)
         return;
     }
 
+    unsigned char reachable[MAP_H][MAP_W];
+    mark_dungeon_reachable_tiles(game, reachable);
     Vec2 best = {20.5, 2.5};
     double best_dist = -1.0;
     for (int y = 1; y < MAP_H - 1; ++y) {
         for (int x = 1; x < MAP_W - 1; ++x) {
-            if (!generated_floor(x, y) || reserved_dynamic_tile(game, x, y)) {
+            if (!generated_floor(x, y) || !reachable[y][x] || occupied_spawn_tile(game, x, y)) {
                 continue;
             }
             double dx = x + 0.5 - 2.5;
@@ -4381,6 +4699,9 @@ static void place_dungeon_relic(GameState *game)
                 best = (Vec2){x + 0.5, y + 0.5};
             }
         }
+    }
+    if (best_dist < 0.0) {
+        best = (Vec2){2.5, 22.5};
     }
 
     game->items[MAX_ITEMS - 1] = (Item){
@@ -4503,7 +4824,7 @@ static void place_generated_monsters(GameState *game, LevelRng *rng, int boss_ro
         monster->target_waypoint = 1;
         monster->route = i;
         monster->type = monster_types[i];
-        monster->hp = monster_max_hp(monster->type);
+        monster->hp = scale_monster_hp_for_difficulty(monster_max_hp(monster->type), game->difficulty);
         monster->facing = (Vec2){0.0, -1.0};
         monster->ai_state = 0;
         monster->last_seen = monster->pos;
@@ -4519,7 +4840,7 @@ static void place_generated_monsters(GameState *game, LevelRng *rng, int boss_ro
         monster->is_boss = boss_room && i == game->monster_count - 1;
         if (monster->is_boss) {
             monster->type = 0;
-            monster->hp = BOSS_HP;
+            monster->hp = scale_monster_hp_for_difficulty(BOSS_HP, game->difficulty);
         }
     }
 }
@@ -4669,6 +4990,7 @@ static void init_game_seed(GameState *game, uint32_t seed, int mode)
     moon_visibility_cache_ready = 0;
     torch_flicker_cache_ready = 0;
     game->generator_mode = mode;
+    game->difficulty = normalize_difficulty(runtime_difficulty);
     game->player_health = PLAYER_MAX_HEALTH;
     game->ammo = START_AMMO;
     game->fireball_ammo = START_FIREBALL_AMMO;
@@ -4717,7 +5039,7 @@ static int can_move(double x, double y)
             }
             double dx = x - tree->pos.x;
             double dy = y - tree->pos.y;
-            if (dx * dx + dy * dy < 0.46 * 0.46) {
+            if (dx * dx + dy * dy < TREE_COLLISION_RADIUS * TREE_COLLISION_RADIUS) {
                 return 0;
             }
         }
@@ -5144,11 +5466,7 @@ static void update_projectiles(GameState *game, const Camera *cam, double dt)
             double dy = p->pos.y - cam->pos.y;
             if (dx * dx + dy * dy < 0.18 && game->hit_flash <= 0.0) {
                 p->active = 0;
-                game->player_health -= p->damage;
-                if (game->player_health <= 0) {
-                    game->player_health = 0;
-                    game->game_over = 1;
-                }
+                apply_player_damage(game, p->damage);
                 game->hit_flash = 0.18;
                 play_sfx(SFX_HURT, 0.44);
             }
@@ -5428,11 +5746,12 @@ static void blend_rect(int x, int y, int w, int h, uint32_t color, double amount
     }
 }
 
-static void render_fps_overlay(double fps, double frame_ms, int quality)
+static void render_fps_overlay(double fps, double frame_ms, int quality, int effects)
 {
     char fps_text[16];
     char ms_text[16];
     const char *quality_text = quality == RENDER_QUALITY_FAST ? "FAST" : "PBR";
+    const char *effects_text = effects == RENDER_EFFECTS_FULL ? "POST ON" : "POST OFF";
     int fps_int = (int)(fps + 0.5);
     int ms_int = (int)(frame_ms + 0.5);
     if (fps_int < 0) fps_int = 0;
@@ -5451,10 +5770,15 @@ static void render_fps_overlay(double fps, double frame_ms, int quality)
     if (quality_w > w) {
         w = quality_w;
     }
-    blend_rect(4, 4, w + 10, 54, rgb(0, 0, 0), 0.52);
+    int effects_w = prompt_text_width(effects_text);
+    if (effects_w > w) {
+        w = effects_w;
+    }
+    blend_rect(4, 4, w + 10, 70, rgb(0, 0, 0), 0.52);
     draw_prompt_text(9, 9, fps_text, rgb(230, 226, 190));
     draw_prompt_text(9, 25, ms_text, rgb(176, 196, 174));
     draw_prompt_text(9, 41, quality_text, quality == RENDER_QUALITY_FAST ? rgb(238, 178, 54) : rgb(196, 188, 176));
+    draw_prompt_text(9, 57, effects_text, effects == RENDER_EFFECTS_FULL ? rgb(238, 178, 54) : rgb(156, 166, 154));
 }
 
 static void draw_timing_line(int y, const char *label, double ms, uint32_t color)
@@ -5469,14 +5793,14 @@ static void draw_timing_line(int y, const char *label, double ms, uint32_t color
 
 static void render_timing_overlay(const RenderProfile *profile)
 {
-    blend_rect(4, 62, 142, 116, rgb(0, 0, 0), 0.54);
-    draw_timing_line(67, "FLOOR", profile->floor_ms, rgb(230, 226, 190));
-    draw_timing_line(83, "WALL", profile->wall_ms, rgb(230, 226, 190));
-    draw_timing_line(99, "SPRITE", profile->sprite_ms, rgb(210, 218, 184));
-    draw_timing_line(115, "FOG", profile->fog_ms, rgb(176, 196, 174));
-    draw_timing_line(131, "BLOOM", profile->bloom_ms, rgb(218, 176, 130));
-    draw_timing_line(147, "POST", profile->post_ms, rgb(196, 188, 176));
-    draw_timing_line(163, "TOTAL", profile->total_ms, rgb(238, 210, 146));
+    blend_rect(4, 78, 142, 116, rgb(0, 0, 0), 0.54);
+    draw_timing_line(83, "FLOOR", profile->floor_ms, rgb(230, 226, 190));
+    draw_timing_line(99, "WALL", profile->wall_ms, rgb(230, 226, 190));
+    draw_timing_line(115, "SPRITE", profile->sprite_ms, rgb(210, 218, 184));
+    draw_timing_line(131, "FOG", profile->fog_ms, rgb(176, 196, 174));
+    draw_timing_line(147, "BLOOM", profile->bloom_ms, rgb(218, 176, 130));
+    draw_timing_line(163, "POST", profile->post_ms, rgb(196, 188, 176));
+    draw_timing_line(179, "TOTAL", profile->total_ms, rgb(238, 210, 146));
 }
 
 static const Portal *active_portal_prompt(const GameState *game, const Camera *cam)
@@ -5495,21 +5819,49 @@ static const Portal *active_portal_prompt(const GameState *game, const Camera *c
     return NULL;
 }
 
-static void render_interaction_prompt(const Camera *cam, const GameState *game)
+static const Door *active_door_prompt(const GameState *game, const Camera *cam)
 {
-    const Portal *portal = active_portal_prompt(game, cam);
-    if (!portal) {
-        return;
-    }
+    int tx = (int)(cam->pos.x + cam->dir.x * 0.95);
+    int ty = (int)(cam->pos.y + cam->dir.y * 0.95);
 
-    const char *label = portal->exit_to_forest ? "F WYJSCIE" : "F WEJSCIE";
-    int w = (int)strlen(label) * 12 - 2;
+    for (int i = 0; i < MAX_DOORS; ++i) {
+        const Door *door = &game->doors[i];
+        if (door->x == tx && door->y == ty && !door->open && !door->opening) {
+            return door;
+        }
+    }
+    return NULL;
+}
+
+static void render_interaction_label(const char *label)
+{
+    int w = prompt_text_width(label);
     int x = SCREEN_W / 2 - w / 2;
     int y = SCREEN_H - 40;
     blend_rect(x - 7, y - 5, w + 14, 24, rgb(4, 4, 5), 0.34);
     blend_rect(x - 5, y - 3, w + 10, 20, rgb(62, 44, 24), 0.20);
     draw_prompt_text(x + 1, y + 1, label, rgb(74, 56, 36));
     draw_prompt_text(x, y, label, rgb(220, 202, 150));
+}
+
+static void render_interaction_prompt(const Camera *cam, const GameState *game)
+{
+    const Portal *portal = active_portal_prompt(game, cam);
+    if (portal) {
+        render_interaction_label(portal->exit_to_forest ? "F WYJSCIE" : "F WEJSCIE");
+        return;
+    }
+
+    const Door *door = active_door_prompt(game, cam);
+    if (door) {
+        if (door->locked && game->keys <= 0) {
+            render_interaction_label("BRAK KLUCZA");
+        } else if (door->locked) {
+            render_interaction_label("F OTWORZ KLUCZEM");
+        } else {
+            render_interaction_label("F OTWORZ");
+        }
+    }
 }
 
 static void render_centered_prompt_line_styled(int y, const char *text, uint32_t color, int underline, int strike)
@@ -5550,6 +5902,79 @@ static void render_help_overlay(const GameState *game)
     render_centered_prompt_line_styled(y + 44, "4 RELIKWIE", relics_done ? rgb(128, 116, 96) : rgb(238, 218, 156), !relics_done, relics_done);
     render_centered_prompt_line_styled(y + 62, "BRAMA BOSSA", boss_done ? rgb(128, 116, 96) : (relics_done ? rgb(238, 218, 156) : rgb(160, 142, 116)), relics_done && !boss_done, boss_done);
     render_centered_prompt_line(y + 78, "H HELP", rgb(158, 142, 108));
+}
+
+enum {
+    MENU_ITEM_PLAY = 0,
+    MENU_ITEM_RESTART,
+    MENU_ITEM_DIFFICULTY,
+    MENU_ITEM_QUALITY,
+    MENU_ITEM_POST,
+    MENU_ITEM_FULLSCREEN,
+    MENU_ITEM_EXIT,
+    MENU_ITEM_COUNT
+};
+
+static void render_menu_item(int y, const char *text, int selected, uint32_t color)
+{
+    int item_w = 252;
+    int item_h = 26;
+    int item_x = SCREEN_W / 2 - item_w / 2;
+    int text_w = prompt_text_width(text);
+    int text_x = SCREEN_W / 2 - text_w / 2;
+    if (selected) {
+        blend_rect(item_x, y - 5, item_w, item_h, rgb(92, 66, 34), 0.56);
+        blend_rect(item_x + 2, y - 3, item_w - 4, item_h - 4, rgb(176, 108, 42), 0.20);
+        fill_rect(item_x - 10, y + 2, 4, 12, rgb(238, 178, 54));
+        fill_rect(item_x + item_w + 6, y + 2, 4, 12, rgb(238, 178, 54));
+    }
+    draw_prompt_text(text_x + 1, y + 1, text, rgb(16, 12, 10));
+    draw_prompt_text(text_x, y, text, color);
+}
+
+static void render_game_menu(int selected, int game_started, int difficulty, int quality, int effects, int fullscreen)
+{
+    const char *items[MENU_ITEM_COUNT] = {
+        game_started ? "WZNOW GRE" : "START GRY",
+        "RESTART",
+        difficulty_menu_text(difficulty),
+        quality == RENDER_QUALITY_FAST ? "JAKOSC FAST" : "JAKOSC PBR",
+        effects == RENDER_EFFECTS_FULL ? "POST ON" : "POST OFF",
+        fullscreen ? "FULLSCREEN ON" : "FULLSCREEN OFF",
+        "WYJSCIE",
+    };
+    int w = 328;
+    int h = 360;
+    int x = SCREEN_W / 2 - w / 2;
+    int y = SCREEN_H / 2 - h / 2;
+    if (y < 8) {
+        y = 8;
+    }
+    if (selected < 0) {
+        selected = 0;
+    } else if (selected >= MENU_ITEM_COUNT) {
+        selected = MENU_ITEM_COUNT - 1;
+    }
+
+    blend_rect(0, 0, SCREEN_W, SCREEN_H, rgb(0, 0, 0), 0.55);
+    blend_rect(x, y, w, h, rgb(4, 5, 6), 0.80);
+    blend_rect(x + 4, y + 4, w - 8, h - 8, rgb(50, 34, 22), 0.26);
+    fill_rect(x + 18, y + 34, w - 36, 1, rgb(112, 82, 42));
+    fill_rect(x + 18, y + h - 45, w - 36, 1, rgb(78, 58, 36));
+
+    render_centered_prompt_line(y + 14, "RAYCASTER", rgb(238, 214, 146));
+    for (int i = 0; i < MENU_ITEM_COUNT; ++i) {
+        uint32_t color = selected == i ? rgb(246, 224, 158) : rgb(198, 184, 146);
+        if (i == MENU_ITEM_DIFFICULTY || i == MENU_ITEM_QUALITY || i == MENU_ITEM_POST || i == MENU_ITEM_FULLSCREEN) {
+            color = selected == i ? rgb(255, 196, 74) : rgb(210, 156, 66);
+        } else if (i == MENU_ITEM_EXIT) {
+            color = selected == i ? rgb(238, 142, 112) : rgb(184, 116, 94);
+        }
+        render_menu_item(y + 64 + i * 36, items[i], selected == i, color);
+    }
+
+    render_centered_prompt_line(y + h - 34, "W/S WYBOR ENTER AKCJA", rgb(148, 132, 100));
+    render_centered_prompt_line(y + h - 18, game_started ? "A/D ZMIANA ESC WROC" : "A/D ZMIANA ESC WYJSCIE", rgb(116, 106, 86));
 }
 
 static void render_relic_notice(const GameState *game)
@@ -5600,6 +6025,7 @@ static void copy_player_progress(GameState *dst, const GameState *src)
     dst->gold = src->gold;
     dst->rapid_timer = src->rapid_timer;
     dst->damage_timer = src->damage_timer;
+    dst->difficulty = src->difficulty;
 }
 
 static void enter_dungeon_from_forest(GameState *game, Camera *cam, const Portal *portal)
@@ -5680,7 +6106,7 @@ static void interact_world(GameState *game, Camera *cam)
 
     for (int i = 0; i < MAX_DOORS; ++i) {
         Door *door = &game->doors[i];
-        if (door->x == tx && door->y == ty && !door->open) {
+        if (door->x == tx && door->y == ty && !door->open && !door->opening) {
             if (!door->locked || game->keys > 0) {
                 door->opening = 1;
                 door->locked = 0;
@@ -5826,7 +6252,7 @@ static void update_game(GameState *game, const Camera *cam, double dt)
     for (int i = 0; i < MAX_DOORS; ++i) {
         Door *door = &game->doors[i];
         if (door->opening && !door->open) {
-            door->open_amount += dt * 2.4;
+            door->open_amount += dt * DOOR_OPEN_SPEED;
             if (door->open_amount >= 1.0) {
                 door->open_amount = 1.0;
                 door->open = 1;
@@ -5884,11 +6310,7 @@ static void update_game(GameState *game, const Camera *cam, double dt)
                 (!monster->is_boss || player_dist > 1.35)) {
                 spawn_monster_shot(game, monster, cam);
             } else if (!monster_uses_projectile(monster->type) && player_dist < (monster->is_boss ? 1.25 : monster_melee_range(monster->type))) {
-                game->player_health -= monster->is_boss ? 24 : monster_melee_damage(monster->type);
-                if (game->player_health <= 0) {
-                    game->player_health = 0;
-                    game->game_over = 1;
-                }
+                apply_player_damage(game, monster->is_boss ? 24 : monster_melee_damage(monster->type));
                 game->hit_flash = 0.18;
                 play_sfx(SFX_MELEE, 0.46);
                 play_sfx(SFX_HURT, 0.34);
@@ -6594,7 +7016,15 @@ static int verify_doors_and_secrets(void)
 
     game.keys = 1;
     interact_world(&game, &cam);
-    for (int i = 0; i < 32; ++i) {
+    for (int i = 0; i < 12; ++i) {
+        update_game(&game, &cam, 1.0 / 60.0);
+    }
+    if (!game.doors[door_index].opening || game.doors[door_index].open ||
+        game.doors[door_index].open_amount <= 0.0 || map_at(game.doors[door_index].x, game.doors[door_index].y) == 0) {
+        fprintf(stderr, "error: keyed door has no visible opening phase\n");
+        return 0;
+    }
+    for (int i = 0; i < 64; ++i) {
         update_game(&game, &cam, 1.0 / 60.0);
     }
     if (!game.doors[door_index].open || map_at(game.doors[door_index].x, game.doors[door_index].y) != 0) {
@@ -6778,6 +7208,31 @@ static int find_relic_item(const GameState *game, int relic_index)
     return -1;
 }
 
+static int verify_generated_dungeon_relic_reachability(void)
+{
+    static const int modes[] = {GENERATOR_ROOMS, GENERATOR_TIGHT};
+    for (int i = 0; i < (int)(sizeof(modes) / sizeof(modes[0])); ++i) {
+        GameState game;
+        init_game_seed(&game, LEVEL_TEST_SEED + 707u + (uint32_t)i * 101u, modes[i]);
+        game.dungeon_relic_index = i;
+        place_dungeon_exit_portal(&game);
+        place_dungeon_relic(&game);
+
+        int relic_item = find_relic_item(&game, i);
+        if (relic_item < 0) {
+            fprintf(stderr, "error: generated dungeon mode %d did not place a relic\n", modes[i]);
+            return 0;
+        }
+        int rx = (int)game.items[relic_item].pos.x;
+        int ry = (int)game.items[relic_item].pos.y;
+        if (!dungeon_tile_reachable_from_entrance(&game, rx, ry)) {
+            fprintf(stderr, "error: generated dungeon mode %d placed relic without entrance path\n", modes[i]);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int verify_relic_story_progress(void)
 {
     GameState game;
@@ -6840,6 +7295,10 @@ static int verify_relic_story_progress(void)
     int relic_item = find_relic_item(&game, relic_index);
     if (relic_item < 0) {
         fprintf(stderr, "error: relic dungeon did not spawn its relic\n");
+        return 0;
+    }
+    if (!dungeon_tile_reachable_from_entrance(&game, (int)game.items[relic_item].pos.x, (int)game.items[relic_item].pos.y)) {
+        fprintf(stderr, "error: relic dungeon placed relic without entrance path\n");
         return 0;
     }
     int relic_guardian = 0;
@@ -7063,6 +7522,47 @@ static int verify_volumetric_fog(void)
     return 1;
 }
 
+static int verify_tree_visible_at_collision_range(void)
+{
+    GameState game;
+    memset(&game, 0, sizeof(game));
+    game.generator_mode = GENERATOR_FOREST;
+    game.time = 1.0;
+    Camera cam = {
+        .pos = {2.5, 22.5},
+        .dir = {1.0, 0.0},
+        .plane = {0.0, 0.66},
+    };
+    Tree tree = {
+        .active = 1,
+        .variant = 0,
+        .pos = {2.5 + TREE_COLLISION_RADIUS + 0.04, 22.5},
+    };
+    uint32_t background = rgb(8, 7, 6);
+
+    for (int i = 0; i < SCREEN_W * SCREEN_H; ++i) {
+        framebuffer[i] = background;
+        depth_buffer[i] = 80.0;
+    }
+    for (int x = 0; x < SCREEN_W; ++x) {
+        z_buffer[x] = 80.0;
+    }
+
+    render_tree(&cam, &game, &tree);
+
+    int changed = 0;
+    for (int i = 0; i < SCREEN_W * SCREEN_H; ++i) {
+        if (framebuffer[i] != background) {
+            changed++;
+        }
+    }
+    if (changed == 0) {
+        fprintf(stderr, "error: tree billboard disappeared before collision boundary\n");
+        return 0;
+    }
+    return 1;
+}
+
 static void move_camera(Camera *cam, const GameState *game, double forward, double strafe, double dt)
 {
     double speed = 3.2 * dt;
@@ -7199,6 +7699,9 @@ static int dump_frame_mode(const char *path, int mode)
     if (!verify_forest_dungeon_transition()) {
         return 1;
     }
+    if (!verify_generated_dungeon_relic_reachability()) {
+        return 1;
+    }
     if (!verify_relic_story_progress()) {
         return 1;
     }
@@ -7212,6 +7715,9 @@ static int dump_frame_mode(const char *path, int mode)
         return 1;
     }
     if (!verify_volumetric_fog()) {
+        return 1;
+    }
+    if (!verify_tree_visible_at_collision_range()) {
         return 1;
     }
     GameState game;
@@ -7351,10 +7857,15 @@ typedef struct {
     GameState game;
     int running;
     int paused;
+    int menu_open;
+    int menu_selected;
+    int game_started;
     int fullscreen;
     int show_fps;
     int show_timings;
     int render_quality;
+    int render_effects;
+    int difficulty;
     int fps_frames;
     uint64_t prev;
     double fps_accum;
@@ -7362,6 +7873,31 @@ typedef struct {
     double frame_ms;
     RenderProfile profile;
 } Runtime;
+
+static void set_runtime_difficulty(Runtime *rt, int difficulty)
+{
+    rt->difficulty = normalize_difficulty(difficulty);
+    runtime_difficulty = rt->difficulty;
+    rt->game.difficulty = rt->difficulty;
+    if (saved_forest.valid) {
+        saved_forest.game.difficulty = rt->difficulty;
+    }
+}
+
+static void cycle_runtime_difficulty(Runtime *rt, int delta)
+{
+    set_runtime_difficulty(rt, adjust_difficulty(rt->difficulty, delta));
+}
+
+static int toggle_runtime_fullscreen(Runtime *rt)
+{
+    rt->fullscreen = !rt->fullscreen;
+    if (SDL_SetWindowFullscreen(rt->window, rt->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {
+        fprintf(stderr, "SDL_SetWindowFullscreen failed: %s\n", SDL_GetError());
+        return 0;
+    }
+    return 1;
+}
 
 static int parse_window_size(const char *text, int *out_w, int *out_h)
 {
@@ -7534,12 +8070,17 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
         return 0;
     }
 
+    rt->running = 1;
+    rt->paused = 1;
+    rt->menu_open = 1;
+    rt->menu_selected = MENU_ITEM_PLAY;
+    rt->difficulty = normalize_difficulty(DEFAULT_DIFFICULTY);
+    runtime_difficulty = rt->difficulty;
     runtime_level_seed = LEVEL_TEST_SEED ^ (uint32_t)SDL_GetTicks() ^ (uint32_t)SDL_GetPerformanceCounter();
     reset_run(&rt->game, &rt->cam);
-
-    rt->running = 1;
     rt->render_quality = config->render_quality;
-    render_effects = config->render_effects;
+    rt->render_effects = config->render_effects;
+    render_effects = rt->render_effects;
     rt->prev = SDL_GetPerformanceCounter();
     return 1;
 }
@@ -7552,10 +8093,80 @@ static void runtime_frame(void *userdata)
         if (event.type == SDL_QUIT) {
             rt->running = 0;
         } else if (event.type == SDL_KEYDOWN) {
-            int help_closed = close_help_on_key(&rt->game);
             SDL_Keycode key = event.key.keysym.sym;
+            int help_closed = rt->menu_open ? 0 : close_help_on_key(&rt->game);
+            if (rt->menu_open) {
+                if ((key == SDLK_w || key == SDLK_UP) && event.key.repeat == 0) {
+                    rt->menu_selected = (rt->menu_selected + MENU_ITEM_COUNT - 1) % MENU_ITEM_COUNT;
+                } else if ((key == SDLK_s || key == SDLK_DOWN) && event.key.repeat == 0) {
+                    rt->menu_selected = (rt->menu_selected + 1) % MENU_ITEM_COUNT;
+                } else if ((key == SDLK_a || key == SDLK_LEFT || key == SDLK_d || key == SDLK_RIGHT) && event.key.repeat == 0) {
+                    int delta = (key == SDLK_a || key == SDLK_LEFT) ? -1 : 1;
+                    if (rt->menu_selected == MENU_ITEM_DIFFICULTY) {
+                        cycle_runtime_difficulty(rt, delta);
+                    } else if (rt->menu_selected == MENU_ITEM_QUALITY) {
+                        rt->render_quality = rt->render_quality == RENDER_QUALITY_FAST ? RENDER_QUALITY_PBR : RENDER_QUALITY_FAST;
+                    } else if (rt->menu_selected == MENU_ITEM_POST) {
+                        rt->render_effects = rt->render_effects == RENDER_EFFECTS_FULL ? RENDER_EFFECTS_OFF : RENDER_EFFECTS_FULL;
+                    } else if (rt->menu_selected == MENU_ITEM_FULLSCREEN) {
+                        if (!toggle_runtime_fullscreen(rt)) {
+                            rt->running = 0;
+                        }
+                    }
+                } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE) && event.key.repeat == 0) {
+                    if (rt->menu_selected == MENU_ITEM_PLAY) {
+                        if (!rt->game_started) {
+                            reset_run(&rt->game, &rt->cam);
+                        }
+                        rt->menu_open = 0;
+                        rt->paused = 0;
+                        rt->game_started = 1;
+                    } else if (rt->menu_selected == MENU_ITEM_RESTART) {
+                        reset_run(&rt->game, &rt->cam);
+                        rt->menu_open = 0;
+                        rt->paused = 0;
+                        rt->game_started = 1;
+                    } else if (rt->menu_selected == MENU_ITEM_DIFFICULTY) {
+                        cycle_runtime_difficulty(rt, 1);
+                    } else if (rt->menu_selected == MENU_ITEM_QUALITY) {
+                        rt->render_quality = rt->render_quality == RENDER_QUALITY_FAST ? RENDER_QUALITY_PBR : RENDER_QUALITY_FAST;
+                    } else if (rt->menu_selected == MENU_ITEM_POST) {
+                        rt->render_effects = rt->render_effects == RENDER_EFFECTS_FULL ? RENDER_EFFECTS_OFF : RENDER_EFFECTS_FULL;
+                    } else if (rt->menu_selected == MENU_ITEM_FULLSCREEN) {
+                        if (!toggle_runtime_fullscreen(rt)) {
+                            rt->running = 0;
+                        }
+                    } else if (rt->menu_selected == MENU_ITEM_EXIT) {
+                        rt->running = 0;
+                    }
+                } else if (key == SDLK_ESCAPE && event.key.repeat == 0) {
+                    if (rt->game_started) {
+                        rt->menu_open = 0;
+                        rt->paused = 0;
+                    } else {
+                        rt->running = 0;
+                    }
+                } else if (key == SDLK_F3 && event.key.repeat == 0) {
+                    rt->show_fps = !rt->show_fps;
+                    rt->fps_accum = 0.0;
+                    rt->fps_frames = 0;
+                } else if (key == SDLK_F4 && event.key.repeat == 0) {
+                    rt->show_timings = !rt->show_timings;
+                } else if (key == SDLK_F5 && event.key.repeat == 0) {
+                    rt->render_quality = rt->render_quality == RENDER_QUALITY_FAST ? RENDER_QUALITY_PBR : RENDER_QUALITY_FAST;
+                } else if (key == SDLK_F6 && event.key.repeat == 0) {
+                    rt->render_effects = rt->render_effects == RENDER_EFFECTS_FULL ? RENDER_EFFECTS_OFF : RENDER_EFFECTS_FULL;
+                } else if (key == SDLK_F11 && event.key.repeat == 0) {
+                    if (!toggle_runtime_fullscreen(rt)) {
+                        rt->running = 0;
+                    }
+                }
+                continue;
+            }
             if (key == SDLK_ESCAPE) {
-                rt->running = 0;
+                rt->menu_open = 1;
+                rt->paused = 1;
+                rt->menu_selected = MENU_ITEM_PLAY;
             } else if (key == SDLK_1) {
                 select_weapon(&rt->game, WEAPON_KNIFE);
             } else if (key == SDLK_2) {
@@ -7566,18 +8177,22 @@ static void runtime_frame(void *userdata)
                 runtime_level_mode = GENERATOR_ROOMS;
                 reset_run(&rt->game, &rt->cam);
                 rt->paused = 0;
+                rt->game_started = 1;
             } else if (key == SDLK_5 && event.key.repeat == 0) {
                 runtime_level_mode = GENERATOR_TIGHT;
                 reset_run(&rt->game, &rt->cam);
                 rt->paused = 0;
+                rt->game_started = 1;
             } else if (key == SDLK_6 && event.key.repeat == 0) {
                 runtime_level_mode = GENERATOR_BOSS;
                 reset_run(&rt->game, &rt->cam);
                 rt->paused = 0;
+                rt->game_started = 1;
             } else if (key == SDLK_7 && event.key.repeat == 0) {
                 runtime_level_mode = GENERATOR_FOREST;
                 reset_run(&rt->game, &rt->cam);
                 rt->paused = 0;
+                rt->game_started = 1;
             } else if (key == SDLK_SPACE) {
                 if (!rt->paused) {
                     player_fire(&rt->game, &rt->cam);
@@ -7598,6 +8213,7 @@ static void runtime_frame(void *userdata)
             } else if (key == SDLK_r && event.key.repeat == 0) {
                 reset_run(&rt->game, &rt->cam);
                 rt->paused = 0;
+                rt->game_started = 1;
             } else if (key == SDLK_F3 && event.key.repeat == 0) {
                 rt->show_fps = !rt->show_fps;
                 rt->fps_accum = 0.0;
@@ -7606,15 +8222,15 @@ static void runtime_frame(void *userdata)
                 rt->show_timings = !rt->show_timings;
             } else if (key == SDLK_F5 && event.key.repeat == 0) {
                 rt->render_quality = rt->render_quality == RENDER_QUALITY_FAST ? RENDER_QUALITY_PBR : RENDER_QUALITY_FAST;
+            } else if (key == SDLK_F6 && event.key.repeat == 0) {
+                rt->render_effects = rt->render_effects == RENDER_EFFECTS_FULL ? RENDER_EFFECTS_OFF : RENDER_EFFECTS_FULL;
             } else if (key == SDLK_F11 && event.key.repeat == 0) {
-                rt->fullscreen = !rt->fullscreen;
-                if (SDL_SetWindowFullscreen(rt->window, rt->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {
-                    fprintf(stderr, "SDL_SetWindowFullscreen failed: %s\n", SDL_GetError());
+                if (!toggle_runtime_fullscreen(rt)) {
                     rt->running = 0;
                 }
             }
         } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
-            if (!rt->paused) {
+            if (!rt->paused && !rt->menu_open) {
                 player_fire(&rt->game, &rt->cam);
             }
         }
@@ -7657,27 +8273,30 @@ static void runtime_frame(void *userdata)
     if (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]) turn -= 1.0;
     if (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) turn += 1.0;
 
-    if (!rt->paused && !rt->game.game_over && !rt->game.victory && (forward != 0.0 || strafe != 0.0)) {
+    if (!rt->paused && !rt->menu_open && !rt->game.game_over && !rt->game.victory && (forward != 0.0 || strafe != 0.0)) {
         move_camera(&rt->cam, &rt->game, forward, strafe, dt);
     }
-    if (!rt->paused && !rt->game.game_over && !rt->game.victory && turn != 0.0) {
+    if (!rt->paused && !rt->menu_open && !rt->game.game_over && !rt->game.victory && turn != 0.0) {
         rotate_camera(&rt->cam, turn * 2.2 * dt);
     }
 
-    if (!rt->paused && !rt->game.game_over && !rt->game.victory) {
+    if (!rt->paused && !rt->menu_open && !rt->game.game_over && !rt->game.victory) {
         update_items(&rt->game, &rt->cam);
         update_game(&rt->game, &rt->cam, dt);
     }
     render_quality = rt->render_quality;
+    render_effects = rt->render_effects;
     active_profile = rt->show_timings ? &rt->profile : NULL;
     render_scene(&rt->cam, &rt->game);
     active_profile = NULL;
     render_quality = RENDER_QUALITY_PBR;
-    if (rt->paused) {
+    if (rt->menu_open) {
+        render_game_menu(rt->menu_selected, rt->game_started, rt->difficulty, rt->render_quality, rt->render_effects, rt->fullscreen);
+    } else if (rt->paused) {
         render_pause_overlay();
     }
     if (rt->show_fps) {
-        render_fps_overlay(rt->fps_value, rt->frame_ms, rt->render_quality);
+        render_fps_overlay(rt->fps_value, rt->frame_ms, rt->render_quality, rt->render_effects);
     }
     if (rt->show_timings) {
         render_timing_overlay(&rt->profile);
