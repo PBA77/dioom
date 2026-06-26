@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Software Raycaster</title>
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      background: #050606;
+      color: #e8e0d0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+    }
+
+    main {
+      width: min(100vw, 960px);
+      padding: 16px;
+      box-sizing: border-box;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      max-height: calc(100vh - 32px);
+      aspect-ratio: 16 / 10;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      background: #000;
+      outline: 1px solid #2b2620;
+    }
+
+    #status {
+      margin-top: 8px;
+      min-height: 20px;
+      font-size: 13px;
+      color: #b8ae9e;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    <div id="status">Loading...</div>
+  </main>
+  <script>
+    var statusElement = document.getElementById("status");
+    var Module = {
+      canvas: document.getElementById("canvas"),
+      print: function(text) {
+        console.log(text);
+      },
+      printErr: function(text) {
+        console.error(text);
+        statusElement.textContent = text;
+      },
+      setStatus: function(text) {
+        statusElement.textContent = text;
+      },
+      onRuntimeInitialized: function() {
+        statusElement.textContent = "";
+        Module.canvas.focus();
+      }
+    };
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>

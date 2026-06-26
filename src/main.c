@@ -12,14 +12,21 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SCREEN_W 320
-#define SCREEN_H 200
-#define WINDOW_SCALE 3
+#ifndef SCREEN_W
+#define SCREEN_W 640
+#endif
+#ifndef SCREEN_H
+#define SCREEN_H 480
+#endif
+#ifndef WINDOW_SCALE
+#define WINDOW_SCALE 2
+#endif
 #define TEX_SIZE 64
 #define TEX_COUNT 8
 #define SPRITE_SIZE 64
+#define GIANT_SKELETON_SPRITE_SIZE 128
 #define SPRITE_FRAMES 4
-#define MONSTER_TYPES 5
+#define MONSTER_TYPES 6
 #define TREE_TYPES 4
 #define DECAL_SIZE 64
 #define DECAL_COUNT 16
@@ -68,6 +75,7 @@
 #define MAP_H 24
 #define TEXTURE_ATLAS_PATH "assets/textures.ppm"
 #define MONSTER_ATLAS_PATH "assets/monsters.ppm"
+#define GIANT_SKELETON_ATLAS_PATH "assets/giant_skeleton.ppm"
 #define TREE_ATLAS_PATH "assets/trees.ppm"
 #define RELIC_ATLAS_PATH "assets/relics.ppm"
 #define ITEM_ATLAS_PATH "assets/items.ppm"
@@ -76,6 +84,7 @@
 #define WALL_DECAL_ATLAS_PATH "assets/wall_decals.ppm"
 #define MAX_SAMPLE_VOICES 16
 #define MONSTER_FLYING_HEAD 4
+#define MONSTER_GIANT_SKELETON 5
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -172,6 +181,8 @@ enum {
     SFX_PORTAL,
     SFX_DOOR,
     SFX_LOCKED,
+    SFX_RELIC,
+    SFX_SHRINE,
     SFX_COUNT,
 };
 
@@ -179,6 +190,19 @@ enum {
     RENDER_QUALITY_PBR = 0,
     RENDER_QUALITY_FAST = 1,
 };
+
+enum {
+    RENDER_EFFECTS_FULL = 0,
+    RENDER_EFFECTS_OFF = 1,
+};
+
+#ifndef DEFAULT_RENDER_QUALITY
+#define DEFAULT_RENDER_QUALITY RENDER_QUALITY_FAST
+#endif
+
+#ifndef DEFAULT_RENDER_EFFECTS
+#define DEFAULT_RENDER_EFFECTS RENDER_EFFECTS_OFF
+#endif
 
 typedef struct {
     Vec2 pos;
@@ -284,6 +308,7 @@ typedef struct {
     double width;
     double height;
     double strength;
+    int next;
 } WallDecal;
 
 typedef struct {
@@ -304,6 +329,7 @@ typedef struct {
     Tree trees[MAX_TREES];
     Decal decals[MAX_DECALS];
     WallDecal wall_decals[MAX_WALL_DECALS];
+    int wall_decal_head[MAP_H][MAP_W][2];
     Particle particles[MAX_PARTICLES];
     Door doors[MAX_DOORS];
     Secret secrets[MAX_SECRETS];
@@ -379,6 +405,7 @@ typedef struct {
 
 static uint32_t framebuffer[SCREEN_W * SCREEN_H];
 static uint32_t textures[TEX_COUNT][TEX_SIZE * TEX_SIZE];
+static uint32_t forest_wall_textures[TEX_COUNT][TEX_SIZE * TEX_SIZE];
 static double texture_luma[TEX_COUNT][TEX_SIZE * TEX_SIZE];
 static double texture_bump[TEX_COUNT][TEX_SIZE * TEX_SIZE];
 static double texture_bright[TEX_COUNT][TEX_SIZE * TEX_SIZE];
@@ -395,6 +422,7 @@ static const Material texture_materials[TEX_COUNT] = {
     {0.80, 0.00, 0.28, 0.56},
 };
 static uint32_t monster_sprites[MONSTER_TYPES][SPRITE_FRAMES][SPRITE_SIZE * SPRITE_SIZE];
+static uint32_t giant_skeleton_sprites[SPRITE_FRAMES][GIANT_SKELETON_SPRITE_SIZE * GIANT_SKELETON_SPRITE_SIZE];
 static uint32_t tree_sprites[TREE_TYPES][SPRITE_SIZE * SPRITE_SIZE];
 static uint32_t relic_sprites[RELIC_COUNT][PROJECTILE_SIZE * PROJECTILE_SIZE];
 static uint32_t item_sprites[ITEM_SPRITE_COUNT][PROJECTILE_SIZE * PROJECTILE_SIZE];
@@ -412,7 +440,8 @@ static double fog_lut[FOG_LUT_SIZE + 1];
 static double forest_fog_lut[FOG_LUT_SIZE + 1];
 static int fog_lut_ready = 0;
 static RenderProfile *active_profile = NULL;
-static int render_quality = RENDER_QUALITY_PBR;
+static int render_quality = DEFAULT_RENDER_QUALITY;
+static int render_effects = DEFAULT_RENDER_EFFECTS;
 static GameState *active_game = NULL;
 static SfxSample sfx_samples[SFX_COUNT];
 static SampleVoice sample_voices[MAX_SAMPLE_VOICES];
@@ -420,6 +449,11 @@ static SDL_AudioDeviceID audio_device = 0;
 static double audio_rate = 44100.0;
 static int level_map[MAP_H][MAP_W];
 static Torch torches[MAX_TORCHES];
+static double torch_flicker_cache[MAX_TORCHES];
+static double torch_flicker_cache_time = 0.0;
+static int torch_flicker_cache_ready = 0;
+static double moon_visibility_cache[MAP_H][MAP_W];
+static int moon_visibility_cache_ready = 0;
 static uint32_t runtime_level_seed = LEVEL_TEST_SEED;
 static int runtime_level_mode = GENERATOR_FOREST;
 static SavedLevel saved_forest;
@@ -700,6 +734,8 @@ static const char *sfx_path(int sfx)
         "assets/sfx/portal.wav",
         "assets/sfx/door.wav",
         "assets/sfx/locked.wav",
+        "assets/sfx/relic.wav",
+        "assets/sfx/shrine.wav",
     };
     return paths[sfx];
 }
@@ -943,6 +979,35 @@ static void build_texture_luts(void)
                 texture_grad_y[tex][idx] = h_d - h_u;
             }
         }
+        uint32_t forest_rows[TEX_SIZE];
+        for (int y = 0; y < TEX_SIZE; ++y) {
+            int r = 0;
+            int g = 0;
+            int b = 0;
+            int samples = 0;
+            for (int oy = -4; oy <= 4; ++oy) {
+                int sy = y + oy;
+                if (sy < 0) {
+                    sy = 0;
+                } else if (sy >= TEX_SIZE) {
+                    sy = TEX_SIZE - 1;
+                }
+                for (int sx = 0; sx < TEX_SIZE; ++sx) {
+                    uint32_t c = textures[tex][sy * TEX_SIZE + sx];
+                    r += (int)((c >> 16) & 0xFFu);
+                    g += (int)((c >> 8) & 0xFFu);
+                    b += (int)(c & 0xFFu);
+                    samples++;
+                }
+            }
+            double height_tint = 0.10 + smooth01((double)y / (TEX_SIZE - 1)) * 0.10;
+            forest_rows[y] = mix_color(rgb(r / samples, g / samples, b / samples), rgb(38, 52, 46), height_tint);
+        }
+        for (int y = 0; y < TEX_SIZE; ++y) {
+            for (int x = 0; x < TEX_SIZE; ++x) {
+                forest_wall_textures[tex][y * TEX_SIZE + x] = forest_rows[y];
+            }
+        }
     }
 }
 
@@ -995,6 +1060,59 @@ static int load_monster_atlas(const char *path)
                     size_t src = ((size_t)(type_y + y) * (size_t)width + (size_t)(frame_x + x)) * 3;
                     monster_sprites[type][frame][y * SPRITE_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
                 }
+            }
+        }
+    }
+
+    free(pixels);
+    return 1;
+}
+
+static int load_giant_skeleton_atlas(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return 0;
+    }
+
+    char magic[3] = {0};
+    int width = 0;
+    int height = 0;
+    int max_value = 0;
+    int ok = fread(magic, 1, 2, f) == 2 &&
+             strcmp(magic, "P6") == 0 &&
+             ppm_next_int(f, &width) &&
+             ppm_next_int(f, &height) &&
+             ppm_next_int(f, &max_value) &&
+             width == GIANT_SKELETON_SPRITE_SIZE * SPRITE_FRAMES &&
+             height == GIANT_SKELETON_SPRITE_SIZE &&
+             max_value == 255;
+
+    int sep = fgetc(f);
+    if (!isspace(sep)) {
+        ok = 0;
+    }
+
+    size_t pixel_count = (size_t)width * (size_t)height;
+    uint8_t *pixels = ok ? malloc(pixel_count * 3) : NULL;
+    if (!pixels) {
+        fclose(f);
+        return 0;
+    }
+
+    ok = fread(pixels, 3, pixel_count, f) == pixel_count;
+    fclose(f);
+    if (!ok) {
+        free(pixels);
+        return 0;
+    }
+
+    for (int frame = 0; frame < SPRITE_FRAMES; ++frame) {
+        int frame_x = frame * GIANT_SKELETON_SPRITE_SIZE;
+        for (int y = 0; y < GIANT_SKELETON_SPRITE_SIZE; ++y) {
+            for (int x = 0; x < GIANT_SKELETON_SPRITE_SIZE; ++x) {
+                size_t src = ((size_t)y * (size_t)width + (size_t)(frame_x + x)) * 3;
+                giant_skeleton_sprites[frame][y * GIANT_SKELETON_SPRITE_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
             }
         }
     }
@@ -1332,6 +1450,10 @@ static int init_assets(void)
         fprintf(stderr, "error: cannot load required monster atlas %s\n", MONSTER_ATLAS_PATH);
         return 0;
     }
+    if (!load_giant_skeleton_atlas(GIANT_SKELETON_ATLAS_PATH)) {
+        fprintf(stderr, "error: cannot load required giant skeleton atlas %s\n", GIANT_SKELETON_ATLAS_PATH);
+        return 0;
+    }
     if (!load_tree_atlas(TREE_ATLAS_PATH)) {
         fprintf(stderr, "error: cannot load required tree atlas %s\n", TREE_ATLAS_PATH);
         return 0;
@@ -1381,9 +1503,22 @@ static int map_at(int x, int y)
     return level_map[y][x];
 }
 
+static void prepare_torch_flicker_cache(double time)
+{
+    if (torch_flicker_cache_ready && torch_flicker_cache_time == time) {
+        return;
+    }
+    for (int i = 0; i < MAX_TORCHES; ++i) {
+        torch_flicker_cache[i] = 1.04 + sin(time * 7.0 + i * 1.73) * 0.10 + sin(time * 13.0 + i * 0.41) * 0.05;
+    }
+    torch_flicker_cache_time = time;
+    torch_flicker_cache_ready = 1;
+}
+
 static double torch_light_at(double x, double y, double time)
 {
     double light = 0.0;
+    prepare_torch_flicker_cache(time);
 
     for (int i = 0; i < MAX_TORCHES; ++i) {
         double dx = x - torches[i].pos.x;
@@ -1394,8 +1529,7 @@ static double torch_light_at(double x, double y, double time)
         }
 
         double fade = 1.0 - smooth01((dist2 - 5.0) / 13.0);
-        double flicker = 1.04 + sin(time * 7.0 + i * 1.73) * 0.10 + sin(time * 13.0 + i * 0.41) * 0.05;
-        light += flicker * 1.45 * fade / (1.0 + dist2 * 0.62);
+        light += torch_flicker_cache[i] * 1.45 * fade / (1.0 + dist2 * 0.62);
     }
 
     return clamp01(light);
@@ -1427,7 +1561,7 @@ static double player_torch_light_at(const Camera *cam, const GameState *game, do
     return clamp01(flicker * (0.48 + forward * 0.20) * fade / (1.0 + dist2 * 0.34));
 }
 
-static double forest_moon_visibility_at(double x, double y)
+static double trace_forest_moon_visibility(double x, double y)
 {
     const double moon_x = 0.88;
     const double moon_y = -0.48;
@@ -1443,6 +1577,29 @@ static double forest_moon_visibility_at(double x, double y)
     }
 
     return clamp01(visibility);
+}
+
+static void build_moon_visibility_cache(void)
+{
+    for (int y = 0; y < MAP_H; ++y) {
+        for (int x = 0; x < MAP_W; ++x) {
+            moon_visibility_cache[y][x] = trace_forest_moon_visibility(x + 0.5, y + 0.5);
+        }
+    }
+    moon_visibility_cache_ready = 1;
+}
+
+static double forest_moon_visibility_at(double x, double y)
+{
+    if (!moon_visibility_cache_ready) {
+        build_moon_visibility_cache();
+    }
+    int ix = (int)x;
+    int iy = (int)y;
+    if (ix < 0 || ix >= MAP_W || iy < 0 || iy >= MAP_H) {
+        return 1.0;
+    }
+    return moon_visibility_cache[iy][ix];
 }
 
 static void wall_bump_light_vector(double hit_x, double hit_y, double *light_x, double *light_y)
@@ -1472,15 +1629,75 @@ static double wall_bump_light(int tex_idx, int tex_x, int tex_y, double light_x,
     return clamp01(0.5 + light_dir * 2.8);
 }
 
+static uint32_t star_hash(int x, int y)
+{
+    uint32_t v = (uint32_t)x * 747796405u ^ (uint32_t)y * 2891336453u ^ 0x9E3779B9u;
+    v ^= v >> 16;
+    v *= 2246822519u;
+    v ^= v >> 13;
+    v *= 3266489917u;
+    v ^= v >> 16;
+    return v;
+}
+
+static void render_forest_sky(const Camera *cam, const GameState *game)
+{
+    enum { STAR_COLUMNS = 4096 };
+    int horizon = SCREEN_H / 2;
+    int star_x[SCREEN_W];
+    const double star_scale = STAR_COLUMNS / (2.0 * M_PI);
+
+    for (int x = 0; x < SCREEN_W; ++x) {
+        double camera_x = 2.0 * x / (double)SCREEN_W - 1.0;
+        double ray_dir_x = cam->dir.x + cam->plane.x * camera_x;
+        double ray_dir_y = cam->dir.y + cam->plane.y * camera_x;
+        double angle = atan2(ray_dir_y, ray_dir_x);
+        if (angle < 0.0) {
+            angle += 2.0 * M_PI;
+        }
+        star_x[x] = ((int)(angle * star_scale)) & (STAR_COLUMNS - 1);
+    }
+
+    for (int y = 0; y <= horizon; ++y) {
+        double t = y / (double)(horizon > 0 ? horizon : 1);
+        uint32_t top = rgb(3, 9, 18);
+        uint32_t mid = rgb(11, 26, 32);
+        uint32_t haze = rgb(30, 48, 46);
+        uint32_t sky = mix_color(mix_color(top, mid, t), haze, smooth01((t - 0.42) / 0.58) * 0.45);
+
+        for (int x = 0; x < SCREEN_W; ++x) {
+            uint32_t color = sky;
+            if (y < horizon - 10) {
+                uint32_t h = star_hash(star_x[x], y);
+                if ((h & 0x7FFu) > 2041u) {
+                    int sparkle = 165 + (int)((h >> 10) & 63u);
+                    double fade = 1.0 - smooth01((y - (horizon * 0.50)) / (horizon * 0.45));
+                    uint32_t star = rgb(clamp_u8(sparkle), clamp_u8(sparkle), clamp_u8(sparkle + 12));
+                    color = mix_color(color, star, clamp01(0.55 + fade * 0.35));
+                }
+            }
+            framebuffer[y * SCREEN_W + x] = color;
+            depth_buffer[y * SCREEN_W + x] = 80.0;
+        }
+    }
+
+    (void)game;
+}
+
 static void render_floor_ceiling(const Camera *cam, const GameState *game)
 {
     int fast_render = render_quality == RENDER_QUALITY_FAST;
+    int forest_mode = game->generator_mode == GENERATOR_FOREST;
     const int floor_tex = game->generator_mode == GENERATOR_FOREST ? 5 : 6;
     const int ceil_tex = game->generator_mode == GENERATOR_FOREST ? 4 : 3;
     double ray_dir_x0 = cam->dir.x - cam->plane.x;
     double ray_dir_y0 = cam->dir.y - cam->plane.y;
     double ray_dir_x1 = cam->dir.x + cam->plane.x;
     double ray_dir_y1 = cam->dir.y + cam->plane.y;
+
+    if (forest_mode) {
+        render_forest_sky(cam, game);
+    }
 
     for (int y = SCREEN_H / 2; y < SCREEN_H; ++y) {
         int p = y - SCREEN_H / 2;
@@ -1489,7 +1706,9 @@ static void render_floor_ceiling(const Camera *cam, const GameState *game)
                 uint32_t horizon_floor = game->generator_mode == GENERATOR_FOREST ? rgb(30, 40, 42) : rgb(18, 17, 16);
                 uint32_t horizon_ceil = game->generator_mode == GENERATOR_FOREST ? rgb(16, 24, 34) : rgb(9, 9, 10);
                 framebuffer[y * SCREEN_W + x] = apply_game_fog(game, horizon_floor, 9.0, 1.05);
-                framebuffer[(SCREEN_H - y - 1) * SCREEN_W + x] = apply_game_fog(game, horizon_ceil, 9.0, 1.10);
+                if (!forest_mode) {
+                    framebuffer[(SCREEN_H - y - 1) * SCREEN_W + x] = apply_game_fog(game, horizon_ceil, 9.0, 1.10);
+                }
             }
             continue;
         }
@@ -1509,8 +1728,22 @@ static void render_floor_ceiling(const Camera *cam, const GameState *game)
         double ceil_base = light * (game->generator_mode == GENERATOR_FOREST ? 0.44 : 0.18);
         uint32_t floor_tint = game->generator_mode == GENERATOR_FOREST ? rgb(132, 154, 142) : rgb(255, 132, 48);
         uint32_t torch_tint = rgb(255, 132, 48);
+        int light_stride = (SCREEN_W >= 640 || SCREEN_H >= 400) ? (fast_render ? 4 : 2) : 1;
 
-        for (int x = 0; x < SCREEN_W; ++x) {
+        for (int x = 0; x < SCREEN_W; x += light_stride) {
+            int block_w = light_stride;
+            if (x + block_w > SCREEN_W) {
+                block_w = SCREEN_W - x;
+            }
+            double sample_offset = (block_w - 1) * 0.5;
+            double sample_floor_x = floor_x + floor_step_x * sample_offset;
+            double sample_floor_y = floor_y + floor_step_y * sample_offset;
+            double player_light = player_torch_light_at(cam, game, sample_floor_x, sample_floor_y);
+            double torch_light = clamp01(torch_light_at(sample_floor_x, sample_floor_y, game->time) + player_light);
+            double moon_light = game->generator_mode == GENERATOR_FOREST ? forest_moon_visibility_at(sample_floor_x, sample_floor_y) : 0.0;
+
+            for (int bx = 0; bx < block_w; ++bx) {
+            int sx = x + bx;
             int cell_x = (int)floor(floor_x);
             int cell_y = (int)floor(floor_y);
             int tx = (int)(TEX_SIZE * (floor_x - cell_x)) & (TEX_SIZE - 1);
@@ -1518,24 +1751,22 @@ static void render_floor_ceiling(const Camera *cam, const GameState *game)
             int texel_idx = ty * TEX_SIZE + tx;
 
             uint32_t floor_color = textures[floor_tex][texel_idx];
-            uint32_t ceil_color = textures[ceil_tex][texel_idx];
-            double player_light = player_torch_light_at(cam, game, floor_x, floor_y);
-            double torch_light = clamp01(torch_light_at(floor_x, floor_y, game->time) + player_light);
-            double moon_light = game->generator_mode == GENERATOR_FOREST ? forest_moon_visibility_at(floor_x, floor_y) : 0.0;
+            uint32_t ceil_color = forest_mode ? 0 : textures[ceil_tex][texel_idx];
             uint32_t lit_floor;
-            uint32_t lit_ceil;
+            uint32_t lit_ceil = 0;
             if (fast_render) {
                 lit_floor = apply_fast_material(
                     floor_color,
                     floor_base + torch_light * 0.70 + moon_light * 0.08,
                     torch_light * 0.76 + moon_light * 0.16);
-                lit_ceil = apply_fast_material(
-                    ceil_color,
-                    ceil_base + torch_light * 0.26 + moon_light * 0.05,
-                    torch_light * 0.26 + moon_light * 0.08);
+                if (!forest_mode) {
+                    lit_ceil = apply_fast_material(
+                        ceil_color,
+                        ceil_base + torch_light * 0.26 + moon_light * 0.05,
+                        torch_light * 0.26 + moon_light * 0.08);
+                }
             } else {
                 double floor_bump = texture_bump_light(floor_tex, tx, ty);
-                double ceil_bump = texture_bump_light(ceil_tex, tx, ty);
                 lit_floor = apply_pbr_material(
                     floor_color,
                     &texture_materials[floor_tex],
@@ -1546,36 +1777,42 @@ static void render_floor_ceiling(const Camera *cam, const GameState *game)
                     texture_bright[floor_tex][texel_idx],
                     game->generator_mode == GENERATOR_FOREST ? 0.10 : 0.02,
                     floor_tint);
-                lit_ceil = apply_pbr_material(
-                    ceil_color,
-                    &texture_materials[ceil_tex],
-                    ceil_base + torch_light * 0.26 + moon_light * 0.05,
-                    torch_light * 0.26 + moon_light * 0.08,
-                    ceil_bump,
-                    fresnel,
-                    texture_bright[ceil_tex][texel_idx],
-                    0.0,
-                    floor_tint);
+                if (!forest_mode) {
+                    double ceil_bump = texture_bump_light(ceil_tex, tx, ty);
+                    lit_ceil = apply_pbr_material(
+                        ceil_color,
+                        &texture_materials[ceil_tex],
+                        ceil_base + torch_light * 0.26 + moon_light * 0.05,
+                        torch_light * 0.26 + moon_light * 0.08,
+                        ceil_bump,
+                        fresnel,
+                        texture_bright[ceil_tex][texel_idx],
+                        0.0,
+                        floor_tint);
+                }
             }
             lit_floor = mix_color(lit_floor, torch_tint, clamp01(torch_light * 0.10));
-            lit_ceil = mix_color(lit_ceil, torch_tint, clamp01(torch_light * 0.04));
+            if (!forest_mode) {
+                lit_ceil = mix_color(lit_ceil, torch_tint, clamp01(torch_light * 0.04));
+            }
             if (game->generator_mode == GENERATOR_FOREST) {
                 lit_floor = mix_color(lit_floor, rgb(118, 150, 136), moon_light * 0.18);
-                lit_ceil = mix_color(lit_ceil, rgb(54, 78, 74), 0.28);
             }
-            framebuffer[y * SCREEN_W + x] = apply_game_fog(game, lit_floor, row_distance, game->generator_mode == GENERATOR_FOREST ? 1.24 : 0.86);
-            framebuffer[(SCREEN_H - y - 1) * SCREEN_W + x] = apply_game_fog(game, lit_ceil, row_distance, game->generator_mode == GENERATOR_FOREST ? 1.18 : 0.76);
-            depth_buffer[y * SCREEN_W + x] = row_distance;
-            depth_buffer[(SCREEN_H - y - 1) * SCREEN_W + x] = row_distance;
-            add_light(x, y, torch_light * 0.18 + player_light * 0.10);
-            add_light(x, SCREEN_H - y - 1, torch_light * 0.08 + player_light * 0.04);
+            framebuffer[y * SCREEN_W + sx] = apply_game_fog(game, lit_floor, row_distance, game->generator_mode == GENERATOR_FOREST ? 1.24 : 0.86);
+            depth_buffer[y * SCREEN_W + sx] = row_distance;
+            add_light(sx, y, torch_light * 0.18 + player_light * 0.10);
+            if (!forest_mode) {
+                framebuffer[(SCREEN_H - y - 1) * SCREEN_W + sx] = apply_game_fog(game, lit_ceil, row_distance, 0.76);
+                depth_buffer[(SCREEN_H - y - 1) * SCREEN_W + sx] = row_distance;
+                add_light(sx, SCREEN_H - y - 1, torch_light * 0.08 + player_light * 0.04);
+            }
             if (game->generator_mode == GENERATOR_FOREST) {
-                add_light(x, y, moon_light * 0.05);
-                add_glow(x, SCREEN_H - y - 1, 0.010);
+                add_light(sx, y, moon_light * 0.05);
             }
 
             floor_x += floor_step_x;
             floor_y += floor_step_y;
+            }
         }
     }
 }
@@ -1701,7 +1938,9 @@ static void render_monster(const Camera *cam, const Monster *monster)
     int sprite_screen_x;
     int sprite_h;
     double depth;
-    double monster_scale = monster->is_boss ? 2.20 : (monster->type == MONSTER_FLYING_HEAD ? 1.42 : 1.0);
+    double monster_scale = monster->is_boss ? 2.20 :
+        (monster->type == MONSTER_GIANT_SKELETON ? 1.50 :
+        (monster->type == MONSTER_FLYING_HEAD ? 1.42 : 1.0));
     if (!project_sprite(cam, monster->pos, monster_scale, &sprite_screen_x, &sprite_h, &depth)) {
         return;
     }
@@ -1724,6 +1963,9 @@ static void render_monster(const Camera *cam, const Monster *monster)
     if (draw_end_x >= SCREEN_W) draw_end_x = SCREEN_W - 1;
 
     int frame = monster_frame_for_camera(cam, monster);
+    int type = monster->type % MONSTER_TYPES;
+    if (type < 0) type = 0;
+    int texture_size = monster->type == MONSTER_GIANT_SKELETON ? GIANT_SKELETON_SPRITE_SIZE : SPRITE_SIZE;
     double light = (monster->is_boss ? 1.22 : 1.0) / (1.0 + depth * 0.055);
 
     for (int stripe = draw_start_x; stripe <= draw_end_x; ++stripe) {
@@ -1731,21 +1973,21 @@ static void render_monster(const Camera *cam, const Monster *monster)
             continue;
         }
 
-        int tex_x = (int)((stripe - (-sprite_w / 2.0 + sprite_screen_x)) * SPRITE_SIZE / sprite_w);
-        if (tex_x < 0 || tex_x >= SPRITE_SIZE) {
+        int tex_x = (int)((stripe - (-sprite_w / 2.0 + sprite_screen_x)) * texture_size / sprite_w);
+        if (tex_x < 0 || tex_x >= texture_size) {
             continue;
         }
 
         for (int y = draw_start_y; y <= draw_end_y; ++y) {
-            int d = (y - raw_start_y) * SPRITE_SIZE;
+            int d = (y - raw_start_y) * texture_size;
             int tex_y = d / sprite_h;
-            if (tex_y < 0 || tex_y >= SPRITE_SIZE) {
+            if (tex_y < 0 || tex_y >= texture_size) {
                 continue;
             }
 
-            int type = monster->type % MONSTER_TYPES;
-            if (type < 0) type = 0;
-            uint32_t color = monster_sprites[type][frame][tex_y * SPRITE_SIZE + tex_x];
+            uint32_t color = monster->type == MONSTER_GIANT_SKELETON
+                ? giant_skeleton_sprites[frame][tex_y * GIANT_SKELETON_SPRITE_SIZE + tex_x]
+                : monster_sprites[type][frame][tex_y * SPRITE_SIZE + tex_x];
             if (!is_sprite_key(color)) {
                 uint32_t lit = shade(color, light);
                 if (monster->pain_timer > 0.0) {
@@ -2323,17 +2565,21 @@ static void render_world_sprites(const Camera *cam, const GameState *game)
 static void render_volumetric_fog(const Camera *cam, const GameState *game)
 {
     uint32_t fog = fog_color_for_game(game);
+    int fog_stride = (SCREEN_W >= 640 || SCREEN_H >= 400) ? 2 : 1;
+    int scatter_steps = fog_stride > 1 ? 2 : 4;
 
-    for (int x = 0; x < SCREEN_W; ++x) {
+    for (int x = 0; x < SCREEN_W; x += fog_stride) {
         double wall_depth = z_buffer[x];
         double camera_x = 2.0 * x / (double)SCREEN_W - 1.0;
         double ray_dir_x = cam->dir.x + cam->plane.x * camera_x;
         double ray_dir_y = cam->dir.y + cam->plane.y * camera_x;
 
-        for (int y = 0; y < SCREEN_H - 14; ++y) {
+        for (int y = 0; y < SCREEN_H - 14; y += fog_stride) {
             int idx = y * SCREEN_W + x;
             int from_horizon = abs(y - SCREEN_H / 2);
             double pixel_depth = depth_buffer[idx];
+            int forest_mode = game->generator_mode == GENERATOR_FOREST;
+            int wall_pixel = forest_mode && pixel_depth > 0.01 && fabs(pixel_depth - wall_depth) < 0.0001;
             if (pixel_depth <= 0.01) {
                 pixel_depth = wall_depth;
             }
@@ -2344,7 +2590,6 @@ static void render_volumetric_fog(const Camera *cam, const GameState *game)
                 }
             }
 
-            int forest_mode = game->generator_mode == GENERATOR_FOREST;
             double pass_strength = forest_mode ? 0.54 : 0.50;
             double pixel_fog = fog_amount_for_game(game, pixel_depth) * pass_strength;
             if (pixel_fog <= 0.002) {
@@ -2382,18 +2627,25 @@ static void render_volumetric_fog(const Camera *cam, const GameState *game)
             if (forest_mode) {
                 double depth_gate = clamp01((pixel_depth - 1.10) / 7.5);
                 amount *= depth_gate * (0.72 + ground * 0.38);
+                if (wall_pixel) {
+                    amount = 0.0;
+                }
             }
 
             if (amount > 0.0015) {
-                uint32_t color = framebuffer[idx];
-                framebuffer[idx] = mix_color(color, fog, clamp01(amount));
+                double mix_amount = clamp01(amount);
+                for (int by = 0; by < fog_stride && y + by < SCREEN_H - 14; ++by) {
+                    for (int bx = 0; bx < fog_stride && x + bx < SCREEN_W; ++bx) {
+                        int block_idx = (y + by) * SCREEN_W + x + bx;
+                        framebuffer[block_idx] = mix_color(framebuffer[block_idx], fog, mix_amount);
+                    }
+                }
             }
 
             if (pixel_depth > 0.35) {
                 double torch_scatter = 0.0;
-                int steps = 4;
-                for (int sample = 1; sample <= steps; ++sample) {
-                    double t = pixel_depth * (sample / (double)(steps + 1));
+                for (int sample = 1; sample <= scatter_steps; ++sample) {
+                    double t = pixel_depth * (sample / (double)(scatter_steps + 1));
                     Vec2 p = {
                         cam->pos.x + ray_dir_x * t,
                         cam->pos.y + ray_dir_y * t,
@@ -2404,15 +2656,23 @@ static void render_volumetric_fog(const Camera *cam, const GameState *game)
                     }
                 }
 
-                torch_scatter = clamp01(torch_scatter / steps);
+                torch_scatter = clamp01(torch_scatter / scatter_steps);
                 double warm_amount = torch_scatter * pixel_fog * (0.020 + ground * 0.090 + wisp * 0.050);
                 if (forest_mode) {
                     warm_amount *= 0.55;
+                    if (wall_pixel) {
+                        warm_amount = 0.0;
+                    }
                 }
                 if (warm_amount > 0.003) {
-                    uint32_t color = framebuffer[idx];
+                    double mix_amount = clamp01(warm_amount);
                     uint32_t scatter_color = game->generator_mode == GENERATOR_FOREST ? rgb(104, 132, 112) : rgb(166, 78, 32);
-                    framebuffer[idx] = mix_color(color, scatter_color, clamp01(warm_amount));
+                    for (int by = 0; by < fog_stride && y + by < SCREEN_H - 14; ++by) {
+                        for (int bx = 0; bx < fog_stride && x + bx < SCREEN_W; ++bx) {
+                            int block_idx = (y + by) * SCREEN_W + x + bx;
+                            framebuffer[block_idx] = mix_color(framebuffer[block_idx], scatter_color, mix_amount);
+                        }
+                    }
                 }
             }
         }
@@ -2908,7 +3168,7 @@ static void render_dynamic_shadows(const Camera *cam, const GameState *game)
         int sh;
         double depth;
         if (project_sprite(cam, monster->pos, 1.0, &sx, &sh, &depth)) {
-            int scale = monster->is_boss ? 3 : 1;
+            int scale = monster->is_boss ? 3 : (monster->type == MONSTER_GIANT_SKELETON ? 2 : 1);
             render_screen_ellipse(sx, SCREEN_H / 2 + sh / 2 - 3, sh * scale / 3, sh * scale / 14 + 1, depth, rgb(0, 0, 0), monster->is_boss ? 0.52 : 0.34);
         }
     }
@@ -2993,17 +3253,49 @@ static void render_decals(const Camera *cam, const GameState *game)
     }
 }
 
+static void clear_wall_decal_index(GameState *game)
+{
+    for (int y = 0; y < MAP_H; ++y) {
+        for (int x = 0; x < MAP_W; ++x) {
+            game->wall_decal_head[y][x][0] = -1;
+            game->wall_decal_head[y][x][1] = -1;
+        }
+    }
+}
+
+static void link_wall_decal(GameState *game, int index)
+{
+    WallDecal *decal = &game->wall_decals[index];
+    if (!decal->active ||
+        decal->x < 0 || decal->x >= MAP_W ||
+        decal->y < 0 || decal->y >= MAP_H ||
+        decal->side < 0 || decal->side > 1) {
+        decal->next = -1;
+        return;
+    }
+
+    decal->next = game->wall_decal_head[decal->y][decal->x][decal->side];
+    game->wall_decal_head[decal->y][decal->x][decal->side] = index;
+}
+
 static uint32_t apply_wall_decals(const GameState *game, int map_x, int map_y, int side, double wall_u, double wall_v, uint32_t lit)
 {
-    for (int i = 0; i < MAX_WALL_DECALS; ++i) {
+    if (map_x < 0 || map_x >= MAP_W || map_y < 0 || map_y >= MAP_H || side < 0 || side > 1) {
+        return lit;
+    }
+
+    int i = game->wall_decal_head[map_y][map_x][side];
+    int guard = 0;
+    while (i >= 0 && i < MAX_WALL_DECALS && guard++ < MAX_WALL_DECALS) {
         const WallDecal *decal = &game->wall_decals[i];
-        if (!decal->active || decal->x != map_x || decal->y != map_y || decal->side != side) {
-            continue;
+        if (!decal->active) {
+            break;
         }
 
         double du = (wall_u - decal->u) / decal->width + 0.5;
         double dv = (wall_v - decal->v) / decal->height + 0.5;
         if (du < 0.0 || du >= 1.0 || dv < 0.0 || dv >= 1.0) {
+            i = decal->next;
             continue;
         }
 
@@ -3014,16 +3306,19 @@ static uint32_t apply_wall_decals(const GameState *game, int map_x, int map_y, i
         int tx = (int)(du * WALL_DECAL_SIZE);
         int ty = (int)(dv * WALL_DECAL_SIZE);
         if (tx < 0 || tx >= WALL_DECAL_SIZE || ty < 0 || ty >= WALL_DECAL_SIZE) {
+            i = decal->next;
             continue;
         }
 
         uint32_t color = wall_decal_sprites[variant][ty * WALL_DECAL_SIZE + tx];
         if (is_sprite_key(color)) {
+            i = decal->next;
             continue;
         }
 
         double amount = clamp01(decal->strength * (0.50 + luminance(color) * 0.30));
         lit = mix_color(lit, color, amount);
+        i = decal->next;
     }
     return lit;
 }
@@ -3045,6 +3340,10 @@ static void render_scene(const Camera *cam, const GameState *game)
         pass_start = total_start;
     }
 
+    prepare_torch_flicker_cache(game->time);
+    if (game->generator_mode == GENERATOR_FOREST && !moon_visibility_cache_ready) {
+        build_moon_visibility_cache();
+    }
     reset_render_buffers();
     render_floor_ceiling(cam, game);
     render_forest_moon(cam, game);
@@ -3125,12 +3424,26 @@ static void render_scene(const Camera *cam, const GameState *game)
         double hit_x = cam->pos.x + ray_dir_x * perp_wall_dist;
         double hit_y = cam->pos.y + ray_dir_y * perp_wall_dist;
 
-        int tex_x = (int)(wall_x * TEX_SIZE);
+        double wall_u = wall_x;
         if ((side == 0 && ray_dir_x > 0.0) || (side == 1 && ray_dir_y < 0.0)) {
-            tex_x = TEX_SIZE - tex_x - 1;
+            wall_u = 1.0 - wall_u;
+        }
+        double tex_u = wall_u;
+        if (game->generator_mode == GENERATOR_FOREST) {
+            double world_u = side == 0 ? hit_y : hit_x;
+            tex_u = world_u * 0.38;
+            tex_u -= floor(tex_u);
+        }
+        const int wall_tex_gutter = 3;
+        int tex_x = wall_tex_gutter + (int)(tex_u * (double)(TEX_SIZE - wall_tex_gutter * 2));
+        if (tex_x >= TEX_SIZE - wall_tex_gutter) {
+            tex_x = TEX_SIZE - wall_tex_gutter - 1;
         }
 
         int tex_idx = (wall - 1) % TEX_COUNT;
+        if (game->generator_mode == GENERATOR_FOREST) {
+            tex_idx = 4;
+        }
         double step = (double)TEX_SIZE / line_h;
         double tex_pos = (draw_start - SCREEN_H / 2.0 + line_h / 2.0) * step;
         double light = side == 1 ? 0.17 : 0.27;
@@ -3140,7 +3453,7 @@ static void render_scene(const Camera *cam, const GameState *game)
         light *= 1.0 / (1.0 + perp_wall_dist * 0.12);
         double player_light = player_torch_light_at(cam, game, hit_x, hit_y);
         double torch_light = clamp01(torch_light_at(hit_x, hit_y, game->time) * (side == 1 ? 0.92 : 1.08) + player_light);
-        double moon_light = game->generator_mode == GENERATOR_FOREST ? forest_moon_visibility_at(hit_x, hit_y) : 0.0;
+        double moon_light = game->generator_mode == GENERATOR_FOREST ? 0.72 : 0.0;
         double fresnel = 0.0;
         double bump_light_x = 0.0;
         double bump_light_y = 0.0;
@@ -3160,15 +3473,25 @@ static void render_scene(const Camera *cam, const GameState *game)
             int tex_y = ((int)tex_pos) & (TEX_SIZE - 1);
             tex_pos += step;
             int texel_idx = tex_y * TEX_SIZE + tex_x;
-            uint32_t color = textures[tex_idx][texel_idx];
-            double bump = fast_render ? 0.5 : wall_bump_light(tex_idx, tex_x, tex_y, bump_light_x, bump_light_y);
+            uint32_t color = game->generator_mode == GENERATOR_FOREST
+                ? forest_wall_textures[tex_idx][tex_y * TEX_SIZE]
+                : textures[tex_idx][texel_idx];
             uint32_t lit;
-            if (fast_render) {
+            if (game->generator_mode == GENERATOR_FOREST) {
+                double wall_v = tex_y / (double)(TEX_SIZE - 1);
+                double height_shadow = 0.92 - smooth01(wall_v) * 0.10;
+                lit = shade(
+                    color,
+                    height_shadow * (light * 1.04 + torch_light * 0.34 + moon_light * 0.08));
+                lit = mix_color(lit, rgb(56, 74, 64), moon_light * 0.08);
+            } else if (fast_render) {
+                double bump = 0.5;
                 lit = apply_fast_material(
                     color,
                     light * (0.84 + bump * 0.22) + torch_light * (0.62 + bump * 0.30) + moon_light * 0.08,
                     torch_light * (0.72 + bump * 0.50) + moon_light * 0.13);
             } else {
+                double bump = wall_bump_light(tex_idx, tex_x, tex_y, bump_light_x, bump_light_y);
                 lit = apply_pbr_material(
                     color,
                     &texture_materials[tex_idx],
@@ -3182,9 +3505,9 @@ static void render_scene(const Camera *cam, const GameState *game)
             }
             lit = mix_color(lit, torch_tint, clamp01(torch_light * 0.10));
             if (game->generator_mode == GENERATOR_FOREST) {
-                lit = mix_color(lit, rgb(106, 136, 120), moon_light * (0.12 + bump * 0.06));
+                lit = mix_color(lit, rgb(106, 136, 120), moon_light * 0.13);
             }
-            lit = apply_wall_decals(game, map_x, map_y, side, (tex_x + 0.5) / TEX_SIZE, (tex_y + 0.5) / TEX_SIZE, lit);
+            lit = apply_wall_decals(game, map_x, map_y, side, wall_u, (tex_y + 0.5) / TEX_SIZE, lit);
             framebuffer[y * SCREEN_W + x] = apply_game_fog(game, lit, perp_wall_dist, game->generator_mode == GENERATOR_FOREST ? 1.22 : 1.0);
             depth_buffer[y * SCREEN_W + x] = perp_wall_dist;
             add_light(x, y, torch_light * 0.10 + player_light * 0.05);
@@ -3215,15 +3538,19 @@ static void render_scene(const Camera *cam, const GameState *game)
         pass_start = now;
     }
 
-    render_light_buffer();
-    render_bloom();
+    if (render_effects == RENDER_EFFECTS_FULL) {
+        render_light_buffer();
+        render_bloom();
+    }
     if (profile) {
         uint64_t now = SDL_GetPerformanceCounter();
         profile->bloom_ms = elapsed_ms(pass_start, now);
         pass_start = now;
     }
 
-    render_color_grade(game);
+    if (render_effects == RENDER_EFFECTS_FULL) {
+        render_color_grade(game);
+    }
     render_hit_flash(game);
     if (profile) {
         uint64_t now = SDL_GetPerformanceCounter();
@@ -3330,6 +3657,7 @@ static int monster_max_hp(int type)
     case 2: return 5;
     case 3: return 4;
     case MONSTER_FLYING_HEAD: return 10;
+    case MONSTER_GIANT_SKELETON: return 18;
     default: return 4;
     }
 }
@@ -3342,6 +3670,7 @@ static double monster_patrol_speed(int type)
     case 2: return 1.28;
     case 3: return 1.10;
     case MONSTER_FLYING_HEAD: return 0.88;
+    case MONSTER_GIANT_SKELETON: return 0.58;
     default: return 1.05;
     }
 }
@@ -3354,6 +3683,7 @@ static double monster_chase_speed(int type)
     case 2: return 1.95;
     case 3: return 1.35;
     case MONSTER_FLYING_HEAD: return 1.30;
+    case MONSTER_GIANT_SKELETON: return 0.92;
     default: return 1.45;
     }
 }
@@ -3366,6 +3696,7 @@ static double monster_attack_speed(int type)
     case 2: return 2.10;
     case 3: return 1.45;
     case MONSTER_FLYING_HEAD: return 1.25;
+    case MONSTER_GIANT_SKELETON: return 0.92;
     default: return 1.55;
     }
 }
@@ -3378,6 +3709,7 @@ static double monster_retreat_speed(int type)
     case 2: return 1.45;
     case 3: return 1.05;
     case MONSTER_FLYING_HEAD: return 1.18;
+    case MONSTER_GIANT_SKELETON: return 0.55;
     default: return 1.0;
     }
 }
@@ -3390,6 +3722,7 @@ static double monster_preferred_distance(int type)
     case 2: return 1.15;
     case 3: return 1.05;
     case MONSTER_FLYING_HEAD: return 5.4;
+    case MONSTER_GIANT_SKELETON: return 1.45;
     default: return 1.2;
     }
 }
@@ -3405,6 +3738,7 @@ static double monster_melee_range(int type)
     case 1: return 0.78;
     case 2: return 0.90;
     case 3: return 0.82;
+    case MONSTER_GIANT_SKELETON: return 1.08;
     default: return 0.80;
     }
 }
@@ -3415,6 +3749,7 @@ static int monster_melee_damage(int type)
     case 0: return 13;
     case 2: return 11;
     case 3: return 8;
+    case MONSTER_GIANT_SKELETON: return 19;
     default: return 7;
     }
 }
@@ -3427,6 +3762,7 @@ static double monster_front_notice_distance(int type)
     case 2: return 6.2;
     case 3: return 6.0;
     case MONSTER_FLYING_HEAD: return 8.4;
+    case MONSTER_GIANT_SKELETON: return 7.2;
     default: return 7.4;
     }
 }
@@ -3439,6 +3775,7 @@ static double monster_close_notice_distance(int type)
     case 2: return 2.85;
     case 3: return 2.20;
     case MONSTER_FLYING_HEAD: return 3.0;
+    case MONSTER_GIANT_SKELETON: return 3.15;
     default: return 2.55;
     }
 }
@@ -3451,6 +3788,7 @@ static double monster_fov_dot(int type)
     case 2: return 0.42;
     case 3: return 0.34;
     case MONSTER_FLYING_HEAD: return 0.24;
+    case MONSTER_GIANT_SKELETON: return 0.22;
     default: return 0.30;
     }
 }
@@ -3959,6 +4297,68 @@ static void place_dungeon_exit_portal(GameState *game)
     };
 }
 
+static Vec2 pick_relic_guard_spot(const GameState *game, Vec2 relic_pos)
+{
+    int cx = (int)relic_pos.x;
+    int cy = (int)relic_pos.y;
+    Vec2 fallback = relic_pos;
+    double best_dist = -1.0;
+
+    for (int radius = 1; radius <= 5; ++radius) {
+        for (int y = cy - radius; y <= cy + radius; ++y) {
+            for (int x = cx - radius; x <= cx + radius; ++x) {
+                if (x < 1 || x >= MAP_W - 1 || y < 1 || y >= MAP_H - 1 || !generated_floor(x, y)) {
+                    continue;
+                }
+                if (occupied_spawn_tile(game, x, y)) {
+                    continue;
+                }
+                double dx = x + 0.5 - relic_pos.x;
+                double dy = y + 0.5 - relic_pos.y;
+                double dist2 = dx * dx + dy * dy;
+                if (dist2 < 1.0 || dist2 > 18.0) {
+                    continue;
+                }
+                if (dist2 > best_dist) {
+                    best_dist = dist2;
+                    fallback = (Vec2){x + 0.5, y + 0.5};
+                }
+            }
+        }
+        if (best_dist > 0.0) {
+            return fallback;
+        }
+    }
+
+    return fallback;
+}
+
+static void place_relic_guardian(GameState *game, Vec2 relic_pos)
+{
+    int index = game->monster_count > 0 ? game->monster_count - 1 : 0;
+    if (game->monster_count <= index) {
+        game->monster_count = index + 1;
+    }
+
+    Monster *monster = &game->monsters[index];
+    Vec2 pos = pick_relic_guard_spot(game, relic_pos);
+    *monster = (Monster){
+        .active = 1,
+        .pos = pos,
+        .facing = {0.0, -1.0},
+        .hp = monster_max_hp(MONSTER_GIANT_SKELETON),
+        .type = MONSTER_GIANT_SKELETON,
+        .shoot_timer = 0.8,
+        .target_waypoint = 1,
+        .route = index,
+        .patrol = {pos, relic_pos},
+        .patrol_count = 2,
+        .strafe_timer = 0.7,
+        .strafe_dir = 1,
+        .last_seen = pos,
+    };
+}
+
 static void place_dungeon_relic(GameState *game)
 {
     int relic = game->dungeon_relic_index;
@@ -3989,6 +4389,7 @@ static void place_dungeon_relic(GameState *game)
         .relic_index = relic,
         .pos = best,
     };
+    place_relic_guardian(game, best);
 }
 
 static void spawn_decal(GameState *game, Vec2 pos, int variant, double radius, double life, double angle);
@@ -4046,6 +4447,7 @@ static void place_generated_wall_decals(GameState *game, LevelRng *rng)
     int target = game->generator_mode == GENERATOR_FOREST ? 14 : 42;
     int count = 0;
     memset(game->wall_decals, 0, sizeof(game->wall_decals));
+    clear_wall_decal_index(game);
 
     for (int attempt = 0; attempt < 700 && count < target && count < MAX_WALL_DECALS; ++attempt) {
         int x = rng_range(rng, 1, MAP_W - 2);
@@ -4081,6 +4483,7 @@ static void place_generated_wall_decals(GameState *game, LevelRng *rng)
         decal->width = 0.34 + (rng_next(rng) % 38u) / 100.0;
         decal->height = 0.30 + (rng_next(rng) % 42u) / 100.0;
         decal->strength = 0.42 + (rng_next(rng) % 36u) / 100.0;
+        link_wall_decal(game, count - 1);
     }
 }
 
@@ -4262,6 +4665,9 @@ static void init_game_seed(GameState *game, uint32_t seed, int mode)
 {
     memset(game, 0, sizeof(*game));
     active_game = game;
+    clear_wall_decal_index(game);
+    moon_visibility_cache_ready = 0;
+    torch_flicker_cache_ready = 0;
     game->generator_mode = mode;
     game->player_health = PLAYER_MAX_HEALTH;
     game->ammo = START_AMMO;
@@ -4826,7 +5232,7 @@ static void pickup_item(GameState *game, Item *item)
                 game->fireball_ammo = MAX_FIREBALL_AMMO;
             }
         }
-        play_sfx(SFX_PORTAL, 0.38);
+        play_sfx(SFX_SHRINE, 0.44);
         break;
     case ITEM_RELIC:
         if (item->relic_index >= 0 && item->relic_index < RELIC_COUNT) {
@@ -4850,9 +5256,7 @@ static void pickup_item(GameState *game, Item *item)
 
     game->pickup_flash = 0.22;
     if (item->type == ITEM_RELIC) {
-        play_sfx(SFX_PICKUP, 0.58);
-        play_sfx(SFX_PORTAL, 0.50);
-        play_sfx(SFX_FIREBALL, 0.30);
+        play_sfx(SFX_RELIC, 0.72);
     } else {
         play_sfx(SFX_PICKUP, item->type == ITEM_KEY ? 0.52 : 0.44);
     }
@@ -4891,9 +5295,17 @@ static void select_weapon(GameState *game, int weapon)
 
 static int portal_matches(const Portal *portal, int tx, int ty, int px, int py)
 {
-    return portal->active &&
-           ((portal->x == tx && portal->y == ty) ||
-            (portal->x == px && portal->y == py));
+    if (!portal->active) {
+        return 0;
+    }
+    if ((portal->x == tx && portal->y == ty) ||
+        (portal->x == px && portal->y == py)) {
+        return 1;
+    }
+
+    double dx = px + 0.5 - (portal->x + 0.5);
+    double dy = py + 0.5 - (portal->y + 0.5);
+    return dx * dx + dy * dy <= 1.75 * 1.75;
 }
 
 static uint8_t prompt_glyph(char c, int row)
@@ -6430,6 +6842,25 @@ static int verify_relic_story_progress(void)
         fprintf(stderr, "error: relic dungeon did not spawn its relic\n");
         return 0;
     }
+    int relic_guardian = 0;
+    for (int i = 0; i < game.monster_count; ++i) {
+        Monster *monster = &game.monsters[i];
+        if (!monster->active || monster->type != MONSTER_GIANT_SKELETON) {
+            continue;
+        }
+        Vec2 diff = {
+            monster->pos.x - game.items[relic_item].pos.x,
+            monster->pos.y - game.items[relic_item].pos.y,
+        };
+        if (vec_len(diff) <= 4.5) {
+            relic_guardian = 1;
+            break;
+        }
+    }
+    if (!relic_guardian) {
+        fprintf(stderr, "error: relic dungeon did not spawn a nearby giant skeleton guardian\n");
+        return 0;
+    }
     cam.pos = game.items[relic_item].pos;
     update_items(&game, &cam);
     if (!(game.relic_mask & (1 << relic_index)) ||
@@ -6807,6 +7238,60 @@ static int dump_frame(const char *path)
     return dump_frame_mode(path, GENERATOR_ROOMS);
 }
 
+static int dump_frame_quality(const char *path, int quality)
+{
+    int previous_quality = render_quality;
+    render_quality = quality;
+    int result = dump_frame(path);
+    render_quality = previous_quality;
+    return result;
+}
+
+static int parse_generator_mode_name(const char *text, int *out_mode)
+{
+    if (strcmp(text, "rooms") == 0) {
+        *out_mode = GENERATOR_ROOMS;
+        return 1;
+    }
+    if (strcmp(text, "forest") == 0) {
+        *out_mode = GENERATOR_FOREST;
+        return 1;
+    }
+    if (strcmp(text, "tight") == 0) {
+        *out_mode = GENERATOR_TIGHT;
+        return 1;
+    }
+    if (strcmp(text, "boss") == 0) {
+        *out_mode = GENERATOR_BOSS;
+        return 1;
+    }
+    return 0;
+}
+
+static int profile_dump_frame(const char *path, int quality, int mode)
+{
+    RenderProfile profile;
+    int previous_quality = render_quality;
+    RenderProfile *previous_profile = active_profile;
+    render_quality = quality;
+    active_profile = &profile;
+    int result = dump_frame_mode(path, mode);
+    active_profile = previous_profile;
+    render_quality = previous_quality;
+    if (result == 0) {
+        fprintf(stderr,
+                "profile total=%.3f floor=%.3f wall=%.3f sprite=%.3f fog=%.3f bloom=%.3f post=%.3f\n",
+                profile.total_ms,
+                profile.floor_ms,
+                profile.wall_ms,
+                profile.sprite_ms,
+                profile.fog_ms,
+                profile.bloom_ms,
+                profile.post_ms);
+    }
+    return result;
+}
+
 static int dump_forest_forward_frames(const char *prefix)
 {
     Camera cam = {
@@ -6850,6 +7335,15 @@ static int dump_forest_forward_frames(const char *prefix)
 }
 
 typedef struct {
+    int window_w;
+    int window_h;
+    int integer_scale;
+    int render_quality;
+    int render_effects;
+    const char *scale_quality;
+} RuntimeConfig;
+
+typedef struct {
     SDL_Window *window;
     SDL_Renderer *renderer;
     SDL_Texture *screen;
@@ -6869,6 +7363,102 @@ typedef struct {
     RenderProfile profile;
 } Runtime;
 
+static int parse_window_size(const char *text, int *out_w, int *out_h)
+{
+    char *end = NULL;
+    long w = strtol(text, &end, 10);
+    if (end == text || (*end != 'x' && *end != 'X')) {
+        return 0;
+    }
+    const char *h_text = end + 1;
+    long h = strtol(h_text, &end, 10);
+    if (end == h_text || *end != '\0' || w < 160 || h < 120 || w > 7680 || h > 4320) {
+        return 0;
+    }
+    *out_w = (int)w;
+    *out_h = (int)h;
+    return 1;
+}
+
+static int parse_scale_quality(const char *text, const char **out_quality)
+{
+    if (strcmp(text, "nearest") == 0 || strcmp(text, "linear") == 0 || strcmp(text, "best") == 0) {
+        *out_quality = text;
+        return 1;
+    }
+    return 0;
+}
+
+static int parse_render_quality(const char *text, int *out_quality)
+{
+    if (strcmp(text, "pbr") == 0) {
+        *out_quality = RENDER_QUALITY_PBR;
+        return 1;
+    }
+    if (strcmp(text, "fast") == 0) {
+        *out_quality = RENDER_QUALITY_FAST;
+        return 1;
+    }
+    return 0;
+}
+
+static int parse_render_effects(const char *text, int *out_effects)
+{
+    if (strcmp(text, "full") == 0) {
+        *out_effects = RENDER_EFFECTS_FULL;
+        return 1;
+    }
+    if (strcmp(text, "off") == 0) {
+        *out_effects = RENDER_EFFECTS_OFF;
+        return 1;
+    }
+    return 0;
+}
+
+static int parse_runtime_config(int argc, char **argv, RuntimeConfig *config)
+{
+    config->window_w = SCREEN_W * WINDOW_SCALE;
+    config->window_h = SCREEN_H * WINDOW_SCALE;
+    config->integer_scale = 0;
+    config->render_quality = DEFAULT_RENDER_QUALITY;
+    config->render_effects = DEFAULT_RENDER_EFFECTS;
+    config->scale_quality = "nearest";
+
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--window") == 0) {
+            if (i + 1 >= argc || !parse_window_size(argv[i + 1], &config->window_w, &config->window_h)) {
+                fprintf(stderr, "error: --window expects WIDTHxHEIGHT, for example 640x480\n");
+                return 0;
+            }
+            i += 1;
+        } else if (strcmp(argv[i], "--scale") == 0) {
+            if (i + 1 >= argc || !parse_scale_quality(argv[i + 1], &config->scale_quality)) {
+                fprintf(stderr, "error: --scale expects nearest, linear, or best\n");
+                return 0;
+            }
+            i += 1;
+        } else if (strcmp(argv[i], "--integer-scale") == 0) {
+            config->integer_scale = 1;
+        } else if (strcmp(argv[i], "--quality") == 0) {
+            if (i + 1 >= argc || !parse_render_quality(argv[i + 1], &config->render_quality)) {
+                fprintf(stderr, "error: --quality expects pbr or fast\n");
+                return 0;
+            }
+            i += 1;
+        } else if (strcmp(argv[i], "--effects") == 0) {
+            if (i + 1 >= argc || !parse_render_effects(argv[i + 1], &config->render_effects)) {
+                fprintf(stderr, "error: --effects expects full or off\n");
+                return 0;
+            }
+            i += 1;
+        } else {
+            fprintf(stderr, "error: unknown option %s\n", argv[i]);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void shutdown_runtime(Runtime *rt)
 {
     if (rt->screen) {
@@ -6887,7 +7477,7 @@ static void shutdown_runtime(Runtime *rt)
     SDL_Quit();
 }
 
-static int init_runtime(Runtime *rt)
+static int init_runtime(Runtime *rt, const RuntimeConfig *config)
 {
     memset(rt, 0, sizeof(*rt));
 
@@ -6904,12 +7494,14 @@ static int init_runtime(Runtime *rt)
         return 0;
     }
 
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, config->scale_quality);
+
     rt->window = SDL_CreateWindow(
         "Software Raycaster",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
-        SCREEN_W * WINDOW_SCALE,
-        SCREEN_H * WINDOW_SCALE,
+        config->window_w,
+        config->window_h,
         SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!rt->window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -6927,6 +7519,7 @@ static int init_runtime(Runtime *rt)
         shutdown_runtime(rt);
         return 0;
     }
+    SDL_RenderSetIntegerScale(rt->renderer, config->integer_scale ? SDL_TRUE : SDL_FALSE);
     SDL_RenderSetLogicalSize(rt->renderer, SCREEN_W, SCREEN_H);
 
     rt->screen = SDL_CreateTexture(
@@ -6941,13 +7534,12 @@ static int init_runtime(Runtime *rt)
         return 0;
     }
 
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
-
     runtime_level_seed = LEVEL_TEST_SEED ^ (uint32_t)SDL_GetTicks() ^ (uint32_t)SDL_GetPerformanceCounter();
     reset_run(&rt->game, &rt->cam);
 
     rt->running = 1;
-    rt->render_quality = RENDER_QUALITY_PBR;
+    rt->render_quality = config->render_quality;
+    render_effects = config->render_effects;
     rt->prev = SDL_GetPerformanceCounter();
     return 1;
 }
@@ -7102,6 +7694,27 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "--dump") == 0) {
         return dump_frame(argv[2]);
     }
+    if (argc == 4 && strcmp(argv[1], "--dump-quality") == 0) {
+        int quality = RENDER_QUALITY_PBR;
+        if (!parse_render_quality(argv[2], &quality)) {
+            fprintf(stderr, "error: --dump-quality expects pbr or fast\n");
+            return 1;
+        }
+        return dump_frame_quality(argv[3], quality);
+    }
+    if (argc == 5 && strcmp(argv[1], "--profile-dump") == 0) {
+        int quality = RENDER_QUALITY_PBR;
+        int mode = GENERATOR_ROOMS;
+        if (!parse_render_quality(argv[2], &quality)) {
+            fprintf(stderr, "error: --profile-dump expects pbr or fast quality\n");
+            return 1;
+        }
+        if (!parse_generator_mode_name(argv[3], &mode)) {
+            fprintf(stderr, "error: --profile-dump expects rooms, forest, tight, or boss mode\n");
+            return 1;
+        }
+        return profile_dump_frame(argv[4], quality, mode);
+    }
     if (argc == 3 && strcmp(argv[1], "--dump-forest") == 0) {
         return dump_frame_mode(argv[2], GENERATOR_FOREST);
     }
@@ -7109,8 +7722,13 @@ int main(int argc, char **argv)
         return dump_forest_forward_frames(argv[2]);
     }
 
+    RuntimeConfig config;
+    if (!parse_runtime_config(argc, argv, &config)) {
+        return 1;
+    }
+
     static Runtime rt;
-    if (!init_runtime(&rt)) {
+    if (!init_runtime(&rt, &config)) {
         return 1;
     }
 
