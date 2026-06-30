@@ -1,5 +1,16 @@
+dioom
+dioom.dSYM/
+dioom-hires
+dioom-hires.dSYM/
+dioom.ini
+dioom.sav
+dioom_slot*.sav
+dioom_slot*.sav.tmp
 raycaster
 raycaster.dSYM/
+raycaster-hires
+raycaster-hires.dSYM/
+raycaster.ini
 frame.ppm
 frame.png
 frame_forest.ppm

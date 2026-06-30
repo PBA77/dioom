@@ -6,7 +6,7 @@ This repository is a small C/SDL2 software raycaster inspired by Wolfenstein-sty
 
 - `src/main.c`: game loop, software renderer, level generation, AI, combat, pickups, HUD, audio, validation, and dump mode.
 - `assets/`: required runtime assets. PPM atlases are loaded by the C game; PNG source/preview files are kept alongside them. WAV files in `assets/sfx/` are required for audio.
-- `Makefile`: builds `raycaster` and provides `make dump` for deterministic validation/render output.
+- `Makefile`: builds `dioom` and provides `make dump` for deterministic validation/render output.
 
 The renderer writes into a `uint32_t` framebuffer and uses SDL2 only for the window, input, audio device, and presenting the final texture. Most visual/gameplay assets are procedural or atlas-based: walls/floors/ceilings, monsters, trees, relics, projectiles, fog, light, particles, decals, HUD, and item sprites.
 
@@ -20,7 +20,7 @@ Use the existing Makefile:
 
 ```sh
 make
-./raycaster
+./dioom
 make dump
 ```
 

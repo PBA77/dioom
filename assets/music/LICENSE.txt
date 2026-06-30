@@ -1,0 +1,28 @@
+MIDI music assets
+
+All files below are sourced from Mutopia Project pages listing Copyright: Public Domain.
+
+- dies_irae.mid
+  Composer: Wolfgang Amadeus Mozart
+  Piece: Dies Irae
+  Source: https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=364
+  MIDI: https://www.mutopiaproject.org/ftp/MozartWA/KV626/dies_irae/dies_irae.mid
+
+- toccata_fugue.mid
+  Composer: Johann Sebastian Bach
+  Piece: Toccata and Fugue in D Minor
+  Source: https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=1780
+  MIDI: https://www.mutopiaproject.org/ftp/BachJS/BWV565/ToccataFugue/ToccataFugue.mid
+
+- masonic_funeral.mid
+  Composer: Wolfgang Amadeus Mozart
+  Piece: Masonic Funeral Music KV 477
+  Source: https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=448
+  MIDI ZIP: https://www.mutopiaproject.org/ftp/MozartWA/KV477/k477/k477-mids.zip
+  Bundled file: k477-score.mid renamed to masonic_funeral.mid.
+
+- pathetique_1.mid
+  Composer: Ludwig van Beethoven
+  Piece: Sonata No. 8 "Pathetique", 1st Movement
+  Source: https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=299
+  MIDI: https://www.mutopiaproject.org/ftp/BeethovenLv/O13/pathetique-1/pathetique-1.mid

@@ -11,6 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#include "prompt_font.h"
 
 #ifndef SCREEN_W
 #define SCREEN_W 640
@@ -31,6 +34,9 @@
 #define TEX_LOCKED_DOOR 9
 #define SPRITE_SIZE 64
 #define GIANT_SKELETON_SPRITE_SIZE 128
+#define BOSS_SPRITE_SIZE 128
+#define MONSTER_ANIM_FRAMES 4
+#define BOSS_ANIM_FRAMES 4
 #define SPRITE_FRAMES 4
 #define MONSTER_TYPES 6
 #define TREE_TYPES 4
@@ -59,6 +65,14 @@
 #define MAX_LEVEL_ROOMS 10
 #define RELIC_COUNT 4
 #define RELIC_MASK_ALL ((1 << RELIC_COUNT) - 1)
+#define FM_MUSIC_VOLUME 0.18
+#define AUDIO_VOLUME_STEPS 8
+#define DEFAULT_SFX_VOLUME_STEP 8
+#define DEFAULT_MUSIC_VOLUME_STEP 6
+#define FM_NOTE_ATTACK 0.010
+#define FM_NOTE_DECAY 7.2
+#define FM_NOTE_MAX_HOLD 0.18
+#define FM_NOTE_RELEASE_DECAY 20.0
 #define BOSS_HP 90
 #define LEVEL_TEST_SEED 0x00C0FFEEu
 #define PLAYER_MAX_HEALTH 160
@@ -85,15 +99,28 @@
 #define TEXTURE_ATLAS_PATH "assets/textures.ppm"
 #define MONSTER_ATLAS_PATH "assets/monsters.ppm"
 #define GIANT_SKELETON_ATLAS_PATH "assets/giant_skeleton.ppm"
+#define BOSS_ATLAS_PATH "assets/boss.ppm"
 #define TREE_ATLAS_PATH "assets/trees.ppm"
 #define RELIC_ATLAS_PATH "assets/relics.ppm"
 #define ITEM_ATLAS_PATH "assets/items.ppm"
 #define WEAPON_ATLAS_PATH "assets/weapons.ppm"
 #define DECAL_ATLAS_PATH "assets/decals.ppm"
 #define WALL_DECAL_ATLAS_PATH "assets/wall_decals.ppm"
+#define MUSIC_DIES_IRAE_PATH "assets/music/dies_irae.mid"
+#define MUSIC_TOCCATA_PATH "assets/music/toccata_fugue.mid"
+#define MUSIC_MASONIC_FUNERAL_PATH "assets/music/masonic_funeral.mid"
+#define MUSIC_PATHETIQUE_PATH "assets/music/pathetique_1.mid"
+#define SETTINGS_PATH "dioom.ini"
+#define SAVEGAME_SLOT_COUNT 8
+#define SAVEGAME_PATH_FORMAT "dioom_slot%d.sav"
+#define SAVEGAME_TMP_PATH_FORMAT "dioom_slot%d.sav.tmp"
+#define SAVEGAME_MAGIC 0x4D4F4944u
+#define SAVEGAME_VERSION 2u
 #define MAX_SAMPLE_VOICES 16
+#define MAX_MIDI_VOICES 24
 #define MONSTER_FLYING_HEAD 4
 #define MONSTER_GIANT_SKELETON 5
+#define MONSTER_BOSS_BUTCHER 6
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -180,6 +207,15 @@ enum {
 };
 
 enum {
+    MUSIC_TRACK_DIES_IRAE = 0,
+    MUSIC_TRACK_TOCCATA,
+    MUSIC_TRACK_MASONIC_FUNERAL,
+    MUSIC_TRACK_PATHETIQUE,
+    MUSIC_TRACK_COUNT,
+    MUSIC_TRACK_FOREST = MUSIC_TRACK_COUNT
+};
+
+enum {
     SFX_PISTOL = 0,
     SFX_FIREBALL,
     SFX_EXPLOSION,
@@ -209,6 +245,7 @@ enum {
     DIFFICULTY_EASY = 0,
     DIFFICULTY_NORMAL,
     DIFFICULTY_HARD,
+    DIFFICULTY_NIGHTMARE,
     DIFFICULTY_COUNT
 };
 
@@ -248,6 +285,7 @@ typedef struct {
     double strafe_timer;
     int strafe_dir;
     double pain_timer;
+    double attack_anim_timer;
     int is_boss;
 } Monster;
 
@@ -376,6 +414,7 @@ typedef struct {
     int show_automap;
     int generator_mode;
     int difficulty;
+    int trainer;
     int in_dungeon;
     int relic_mask;
     int relic_count;
@@ -411,9 +450,46 @@ static const char *difficulty_menu_text(int difficulty)
         return "TRUDNOSC LATWY";
     case DIFFICULTY_HARD:
         return "TRUDNOSC TRUDNY";
+    case DIFFICULTY_NIGHTMARE:
+        return "TRUDNOSC NIGHTMARE";
     default:
         return "TRUDNOSC NORMAL";
     }
+}
+
+static const char *difficulty_config_text(int difficulty)
+{
+    switch (normalize_difficulty(difficulty)) {
+    case DIFFICULTY_EASY:
+        return "easy";
+    case DIFFICULTY_HARD:
+        return "hard";
+    case DIFFICULTY_NIGHTMARE:
+        return "nightmare";
+    default:
+        return "normal";
+    }
+}
+
+static int parse_difficulty_name(const char *text, int *out_difficulty)
+{
+    if (strcmp(text, "easy") == 0) {
+        *out_difficulty = DIFFICULTY_EASY;
+        return 1;
+    }
+    if (strcmp(text, "normal") == 0) {
+        *out_difficulty = DIFFICULTY_NORMAL;
+        return 1;
+    }
+    if (strcmp(text, "hard") == 0) {
+        *out_difficulty = DIFFICULTY_HARD;
+        return 1;
+    }
+    if (strcmp(text, "nightmare") == 0) {
+        *out_difficulty = DIFFICULTY_NIGHTMARE;
+        return 1;
+    }
+    return 0;
 }
 
 static int adjust_difficulty(int difficulty, int delta)
@@ -436,6 +512,9 @@ static int scale_monster_hp_for_difficulty(int hp, int difficulty)
     case DIFFICULTY_HARD:
         scale = 1.35;
         break;
+    case DIFFICULTY_NIGHTMARE:
+        scale = 1.80;
+        break;
     default:
         break;
     }
@@ -453,6 +532,9 @@ static int scale_enemy_damage_for_difficulty(const GameState *game, int damage)
     case DIFFICULTY_HARD:
         scale = 1.35;
         break;
+    case DIFFICULTY_NIGHTMARE:
+        scale = 1.75;
+        break;
     default:
         break;
     }
@@ -462,6 +544,9 @@ static int scale_enemy_damage_for_difficulty(const GameState *game, int damage)
 
 static void apply_player_damage(GameState *game, int damage)
 {
+    if (game->trainer) {
+        return;
+    }
     game->player_health -= scale_enemy_damage_for_difficulty(game, damage);
     if (game->player_health <= 0) {
         game->player_health = 0;
@@ -497,6 +582,38 @@ typedef struct {
     double volume;
 } SampleVoice;
 
+typedef struct {
+    double time;
+    double drone_phase;
+    double drone_mod_phase;
+} FmMusicState;
+
+typedef struct {
+    double time;
+    uint8_t note;
+    uint8_t velocity;
+    uint8_t on;
+} MidiMusicEvent;
+
+typedef struct {
+    MidiMusicEvent *events;
+    int event_count;
+    int next_event;
+    double playhead;
+    double length;
+} MidiMusic;
+
+typedef struct {
+    int active;
+    int note;
+    double velocity;
+    double phase;
+    double mod_phase;
+    double age;
+    double release_time;
+    double release_level;
+} FmMidiVoice;
+
 static uint32_t framebuffer[SCREEN_W * SCREEN_H];
 static uint32_t textures[TEX_COUNT][TEX_SIZE * TEX_SIZE];
 static uint32_t forest_wall_textures[TEX_COUNT][TEX_SIZE * TEX_SIZE];
@@ -517,8 +634,9 @@ static const Material texture_materials[TEX_COUNT] = {
     {0.68, 0.00, 0.18, 0.60},
     {0.62, 0.02, 0.12, 0.66},
 };
-static uint32_t monster_sprites[MONSTER_TYPES][SPRITE_FRAMES][SPRITE_SIZE * SPRITE_SIZE];
-static uint32_t giant_skeleton_sprites[SPRITE_FRAMES][GIANT_SKELETON_SPRITE_SIZE * GIANT_SKELETON_SPRITE_SIZE];
+static uint32_t monster_sprites[MONSTER_TYPES][SPRITE_FRAMES][MONSTER_ANIM_FRAMES][SPRITE_SIZE * SPRITE_SIZE];
+static uint32_t giant_skeleton_sprites[SPRITE_FRAMES][MONSTER_ANIM_FRAMES][GIANT_SKELETON_SPRITE_SIZE * GIANT_SKELETON_SPRITE_SIZE];
+static uint32_t boss_sprites[SPRITE_FRAMES][BOSS_ANIM_FRAMES][BOSS_SPRITE_SIZE * BOSS_SPRITE_SIZE];
 static uint32_t tree_sprites[TREE_TYPES][SPRITE_SIZE * SPRITE_SIZE];
 static uint32_t relic_sprites[RELIC_COUNT][PROJECTILE_SIZE * PROJECTILE_SIZE];
 static uint32_t item_sprites[ITEM_SPRITE_COUNT][PROJECTILE_SIZE * PROJECTILE_SIZE];
@@ -544,8 +662,16 @@ static int render_effects = DEFAULT_RENDER_EFFECTS;
 static GameState *active_game = NULL;
 static SfxSample sfx_samples[SFX_COUNT];
 static SampleVoice sample_voices[MAX_SAMPLE_VOICES];
+static FmMusicState fm_music;
+static MidiMusic midi_tracks[MUSIC_TRACK_COUNT];
+static FmMidiVoice midi_voices[MAX_MIDI_VOICES];
+static int active_music_track = MUSIC_TRACK_DIES_IRAE;
 static SDL_AudioDeviceID audio_device = 0;
 static double audio_rate = 44100.0;
+static int sfx_volume_step = DEFAULT_SFX_VOLUME_STEP;
+static int music_volume_step = DEFAULT_MUSIC_VOLUME_STEP;
+static double sfx_volume = DEFAULT_SFX_VOLUME_STEP / (double)AUDIO_VOLUME_STEPS;
+static double music_volume = DEFAULT_MUSIC_VOLUME_STEP / (double)AUDIO_VOLUME_STEPS;
 static int level_map[MAP_H][MAP_W];
 static Torch torches[MAX_TORCHES];
 static double torch_flicker_cache[MAX_TORCHES];
@@ -556,6 +682,7 @@ static int moon_visibility_cache_ready = 0;
 static uint32_t runtime_level_seed = LEVEL_TEST_SEED;
 static int runtime_level_mode = GENERATOR_FOREST;
 static int runtime_difficulty = DEFAULT_DIFFICULTY;
+static int runtime_trainer = 0;
 static SavedLevel saved_forest;
 
 static uint32_t rgb(uint8_t r, uint8_t g, uint8_t b)
@@ -787,6 +914,270 @@ static void reset_render_buffers(void)
     }
 }
 
+static void wrap_audio_phase(double *phase)
+{
+    double cycle = M_PI * 2.0;
+    if (*phase >= cycle) {
+        *phase -= cycle;
+    } else if (*phase < 0.0) {
+        *phase += cycle;
+    }
+}
+
+static double fm_osc(double *carrier_phase, double *mod_phase, double carrier_hz, double mod_hz, double index)
+{
+    double sample = sin(*carrier_phase + sin(*mod_phase) * index);
+    double phase_step = (M_PI * 2.0) / audio_rate;
+    *carrier_phase += carrier_hz * phase_step;
+    *mod_phase += mod_hz * phase_step;
+    wrap_audio_phase(carrier_phase);
+    wrap_audio_phase(mod_phase);
+    return sample;
+}
+
+static double midi_note_frequency(int note)
+{
+    static const int shifts[MUSIC_TRACK_COUNT] = {-12, 0, -24, -12};
+    int shift = active_music_track >= 0 && active_music_track < MUSIC_TRACK_COUNT ? shifts[active_music_track] : -12;
+    note += shift;
+    if (note < 12) {
+        note = 12;
+    }
+    if (note > 108) {
+        note = 108;
+    }
+    return 440.0 * pow(2.0, ((double)note - 69.0) / 12.0);
+}
+
+static double active_music_mod_ratio(int note)
+{
+    static const double even_ratios[MUSIC_TRACK_COUNT] = {1.503, 3.002, 0.997, 2.414};
+    static const double odd_ratios[MUSIC_TRACK_COUNT] = {1.997, 2.498, 1.251, 1.618};
+    int track = active_music_track >= 0 && active_music_track < MUSIC_TRACK_COUNT ? active_music_track : MUSIC_TRACK_DIES_IRAE;
+    return (note & 1) ? odd_ratios[track] : even_ratios[track];
+}
+
+static double active_music_index_base(void)
+{
+    static const double bases[MUSIC_TRACK_COUNT] = {2.5, 5.2, 1.4, 4.0};
+    int track = active_music_track >= 0 && active_music_track < MUSIC_TRACK_COUNT ? active_music_track : MUSIC_TRACK_DIES_IRAE;
+    return bases[track];
+}
+
+static double active_music_drone_root(void)
+{
+    static const double roots[MUSIC_TRACK_COUNT] = {36.71, 27.50, 29.14, 24.50};
+    if (active_music_track == MUSIC_TRACK_FOREST) {
+        return 34.65;
+    }
+    int track = active_music_track >= 0 && active_music_track < MUSIC_TRACK_COUNT ? active_music_track : MUSIC_TRACK_DIES_IRAE;
+    return roots[track];
+}
+
+static double fm_midi_voice_envelope(const FmMidiVoice *voice)
+{
+    double hold = clamp01(voice->age / FM_NOTE_ATTACK) * (0.10 + 0.90 * exp(-voice->age * FM_NOTE_DECAY));
+    if (voice->release_time >= 0.0) {
+        return voice->release_level * exp(-voice->release_time * FM_NOTE_RELEASE_DECAY);
+    }
+    return hold;
+}
+
+static void fm_midi_note_on(uint8_t note, uint8_t velocity)
+{
+    int slot = -1;
+    double oldest = -1.0;
+    for (int i = 0; i < MAX_MIDI_VOICES; ++i) {
+        if (!midi_voices[i].active) {
+            slot = i;
+            break;
+        }
+        double age_score = midi_voices[i].release_time >= 0.0 ? midi_voices[i].age + 1000.0 : midi_voices[i].age;
+        if (age_score > oldest) {
+            oldest = age_score;
+            slot = i;
+        }
+    }
+
+    if (slot < 0) {
+        return;
+    }
+    midi_voices[slot] = (FmMidiVoice){
+        .active = 1,
+        .note = note,
+        .velocity = clamp01(velocity / 127.0),
+        .phase = 0.0,
+        .mod_phase = 0.0,
+        .age = 0.0,
+        .release_time = -1.0,
+        .release_level = 0.0,
+    };
+}
+
+static void fm_midi_note_off(uint8_t note)
+{
+    for (int i = 0; i < MAX_MIDI_VOICES; ++i) {
+        FmMidiVoice *voice = &midi_voices[i];
+        if (voice->active && voice->note == note && voice->release_time < 0.0) {
+            voice->release_level = fm_midi_voice_envelope(voice);
+            voice->release_time = 0.0;
+        }
+    }
+}
+
+static double fm_midi_voices_sample(void)
+{
+    double sample = 0.0;
+    double dt = 1.0 / audio_rate;
+    double phase_step = M_PI * 2.0 / audio_rate;
+
+    for (int i = 0; i < MAX_MIDI_VOICES; ++i) {
+        FmMidiVoice *voice = &midi_voices[i];
+        if (!voice->active) {
+            continue;
+        }
+
+        if (voice->release_time < 0.0 && voice->age >= FM_NOTE_MAX_HOLD) {
+            voice->release_level = fm_midi_voice_envelope(voice);
+            voice->release_time = 0.0;
+        }
+
+        double env = fm_midi_voice_envelope(voice);
+        if (voice->release_time >= 0.0 && env < 0.001) {
+            voice->active = 0;
+            continue;
+        }
+
+        double freq = midi_note_frequency(voice->note);
+        double ratio = active_music_mod_ratio(voice->note);
+        double index = active_music_index_base() + voice->velocity * 3.8;
+        double tone = sin(voice->phase + sin(voice->mod_phase) * index);
+        tone += sin(voice->phase * 0.5) * 0.18;
+        sample += tone * env * voice->velocity * 0.095;
+
+        voice->phase += freq * phase_step;
+        voice->mod_phase += freq * ratio * phase_step;
+        wrap_audio_phase(&voice->phase);
+        wrap_audio_phase(&voice->mod_phase);
+        voice->age += dt;
+        if (voice->release_time >= 0.0) {
+            voice->release_time += dt;
+        }
+    }
+    return sample;
+}
+
+static double fm_midi_music_sample(void)
+{
+    if (active_music_track < 0 || active_music_track >= MUSIC_TRACK_COUNT) {
+        return 0.0;
+    }
+    MidiMusic *music = &midi_tracks[active_music_track];
+    if (!music->events || music->event_count <= 0 || music->length <= 0.0) {
+        return 0.0;
+    }
+
+    while (music->next_event < music->event_count &&
+           music->events[music->next_event].time <= music->playhead) {
+        const MidiMusicEvent *event = &music->events[music->next_event++];
+        if (event->on) {
+            fm_midi_note_on(event->note, event->velocity);
+        } else {
+            fm_midi_note_off(event->note);
+        }
+    }
+
+    double sample = fm_midi_voices_sample();
+    music->playhead += 1.0 / audio_rate;
+    if (music->playhead >= music->length) {
+        music->playhead = 0.0;
+        music->next_event = 0;
+        memset(midi_voices, 0, sizeof(midi_voices));
+    }
+    return sample;
+}
+
+static double fm_music_sample(void)
+{
+    double root = active_music_drone_root();
+    double fade = clamp01(fm_music.time / 3.0);
+    double pulse = 0.78 + 0.22 * sin(fm_music.time * M_PI * 0.11);
+    double drone = fm_osc(&fm_music.drone_phase, &fm_music.drone_mod_phase, root, root * 1.503, 3.2);
+    double midi = fm_midi_music_sample();
+    fm_music.time += 1.0 / audio_rate;
+
+    double sample = (drone * 0.08 * pulse + midi * 1.18) * fade * FM_MUSIC_VOLUME * music_volume;
+    return sample / (1.0 + fabs(sample) * 0.45);
+}
+
+static int clamp_volume_step(int step)
+{
+    if (step < 0) {
+        return 0;
+    }
+    if (step > AUDIO_VOLUME_STEPS) {
+        return AUDIO_VOLUME_STEPS;
+    }
+    return step;
+}
+
+static void set_audio_volume_steps(int sfx_step, int music_step)
+{
+    int next_sfx = clamp_volume_step(sfx_step);
+    int next_music = clamp_volume_step(music_step);
+    if (audio_device) {
+        SDL_LockAudioDevice(audio_device);
+    }
+    sfx_volume_step = next_sfx;
+    music_volume_step = next_music;
+    sfx_volume = sfx_volume_step / (double)AUDIO_VOLUME_STEPS;
+    music_volume = music_volume_step / (double)AUDIO_VOLUME_STEPS;
+    if (audio_device) {
+        SDL_UnlockAudioDevice(audio_device);
+    }
+}
+
+static void reset_midi_track(MidiMusic *music)
+{
+    music->playhead = 0.0;
+    music->next_event = 0;
+}
+
+static void set_active_music_track(int track)
+{
+    if (track < 0 || track > MUSIC_TRACK_FOREST) {
+        track = MUSIC_TRACK_FOREST;
+    }
+    if (audio_device) {
+        SDL_LockAudioDevice(audio_device);
+    }
+    active_music_track = track;
+    if (active_music_track < MUSIC_TRACK_COUNT) {
+        reset_midi_track(&midi_tracks[active_music_track]);
+    }
+    memset(midi_voices, 0, sizeof(midi_voices));
+    fm_music.time = 0.0;
+    fm_music.drone_phase = 0.0;
+    fm_music.drone_mod_phase = 0.0;
+    if (audio_device) {
+        SDL_UnlockAudioDevice(audio_device);
+    }
+}
+
+static int music_track_for_relic(int relic_index)
+{
+    static const int tracks[RELIC_COUNT] = {
+        MUSIC_TRACK_DIES_IRAE,
+        MUSIC_TRACK_MASONIC_FUNERAL,
+        MUSIC_TRACK_PATHETIQUE,
+        MUSIC_TRACK_TOCCATA,
+    };
+    if (relic_index < 0 || relic_index >= RELIC_COUNT) {
+        return MUSIC_TRACK_TOCCATA;
+    }
+    return tracks[relic_index];
+}
+
 static void audio_callback(void *userdata, uint8_t *stream, int len)
 {
     (void)userdata;
@@ -794,7 +1185,7 @@ static void audio_callback(void *userdata, uint8_t *stream, int len)
     int samples = len / (int)sizeof(int16_t);
 
     for (int i = 0; i < samples; ++i) {
-        double sample = 0.0;
+        double sample = fm_music_sample();
         for (int v = 0; v < MAX_SAMPLE_VOICES; ++v) {
             SampleVoice *voice = &sample_voices[v];
             if (!voice->active) {
@@ -812,7 +1203,7 @@ static void audio_callback(void *userdata, uint8_t *stream, int len)
             if (samples_left < 512) {
                 env = samples_left / 512.0;
             }
-            sample += (src / 32768.0) * voice->volume * env;
+            sample += (src / 32768.0) * voice->volume * env * sfx_volume;
             voice->cursor += (Uint32)sizeof(int16_t);
         }
         if (sample > 1.0) sample = 1.0;
@@ -929,6 +1320,8 @@ static int init_audio(void)
         return 0;
     }
     audio_rate = (double)have.freq;
+    memset(&fm_music, 0, sizeof(fm_music));
+    memset(midi_voices, 0, sizeof(midi_voices));
     if (!load_sfx_samples(&have)) {
         SDL_CloseAudioDevice(audio_device);
         audio_device = 0;
@@ -1127,8 +1520,8 @@ static int load_monster_atlas(const char *path)
              ppm_next_int(f, &width) &&
              ppm_next_int(f, &height) &&
              ppm_next_int(f, &max_value) &&
-             width == SPRITE_SIZE * SPRITE_FRAMES &&
-             height == SPRITE_SIZE * MONSTER_TYPES &&
+             width == SPRITE_SIZE * MONSTER_ANIM_FRAMES &&
+             height == SPRITE_SIZE * SPRITE_FRAMES * MONSTER_TYPES &&
              max_value == 255;
 
     int sep = fgetc(f);
@@ -1151,14 +1544,16 @@ static int load_monster_atlas(const char *path)
     }
 
     for (int type = 0; type < MONSTER_TYPES; ++type) {
-        int type_y = type * SPRITE_SIZE;
+        int type_y = type * SPRITE_FRAMES * SPRITE_SIZE;
         for (int frame = 0; frame < SPRITE_FRAMES; ++frame) {
-            int frame_x = frame * SPRITE_SIZE;
-
-            for (int y = 0; y < SPRITE_SIZE; ++y) {
-                for (int x = 0; x < SPRITE_SIZE; ++x) {
-                    size_t src = ((size_t)(type_y + y) * (size_t)width + (size_t)(frame_x + x)) * 3;
-                    monster_sprites[type][frame][y * SPRITE_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
+            int frame_y = type_y + frame * SPRITE_SIZE;
+            for (int anim = 0; anim < MONSTER_ANIM_FRAMES; ++anim) {
+                int frame_x = anim * SPRITE_SIZE;
+                for (int y = 0; y < SPRITE_SIZE; ++y) {
+                    for (int x = 0; x < SPRITE_SIZE; ++x) {
+                        size_t src = ((size_t)(frame_y + y) * (size_t)width + (size_t)(frame_x + x)) * 3;
+                        monster_sprites[type][frame][anim][y * SPRITE_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
+                    }
                 }
             }
         }
@@ -1184,8 +1579,8 @@ static int load_giant_skeleton_atlas(const char *path)
              ppm_next_int(f, &width) &&
              ppm_next_int(f, &height) &&
              ppm_next_int(f, &max_value) &&
-             width == GIANT_SKELETON_SPRITE_SIZE * SPRITE_FRAMES &&
-             height == GIANT_SKELETON_SPRITE_SIZE &&
+             width == GIANT_SKELETON_SPRITE_SIZE * MONSTER_ANIM_FRAMES &&
+             height == GIANT_SKELETON_SPRITE_SIZE * SPRITE_FRAMES &&
              max_value == 255;
 
     int sep = fgetc(f);
@@ -1208,11 +1603,70 @@ static int load_giant_skeleton_atlas(const char *path)
     }
 
     for (int frame = 0; frame < SPRITE_FRAMES; ++frame) {
-        int frame_x = frame * GIANT_SKELETON_SPRITE_SIZE;
-        for (int y = 0; y < GIANT_SKELETON_SPRITE_SIZE; ++y) {
-            for (int x = 0; x < GIANT_SKELETON_SPRITE_SIZE; ++x) {
-                size_t src = ((size_t)y * (size_t)width + (size_t)(frame_x + x)) * 3;
-                giant_skeleton_sprites[frame][y * GIANT_SKELETON_SPRITE_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
+        int frame_y = frame * GIANT_SKELETON_SPRITE_SIZE;
+        for (int anim = 0; anim < MONSTER_ANIM_FRAMES; ++anim) {
+            int frame_x = anim * GIANT_SKELETON_SPRITE_SIZE;
+            for (int y = 0; y < GIANT_SKELETON_SPRITE_SIZE; ++y) {
+                for (int x = 0; x < GIANT_SKELETON_SPRITE_SIZE; ++x) {
+                    size_t src = ((size_t)(frame_y + y) * (size_t)width + (size_t)(frame_x + x)) * 3;
+                    giant_skeleton_sprites[frame][anim][y * GIANT_SKELETON_SPRITE_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
+                }
+            }
+        }
+    }
+
+    free(pixels);
+    return 1;
+}
+
+static int load_boss_atlas(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return 0;
+    }
+
+    char magic[3] = {0};
+    int width = 0;
+    int height = 0;
+    int max_value = 0;
+    int ok = fread(magic, 1, 2, f) == 2 &&
+             strcmp(magic, "P6") == 0 &&
+             ppm_next_int(f, &width) &&
+             ppm_next_int(f, &height) &&
+             ppm_next_int(f, &max_value) &&
+             width == BOSS_SPRITE_SIZE * BOSS_ANIM_FRAMES &&
+             height == BOSS_SPRITE_SIZE * SPRITE_FRAMES &&
+             max_value == 255;
+
+    int sep = fgetc(f);
+    if (!isspace(sep)) {
+        ok = 0;
+    }
+
+    size_t pixel_count = (size_t)width * (size_t)height;
+    uint8_t *pixels = ok ? malloc(pixel_count * 3) : NULL;
+    if (!pixels) {
+        fclose(f);
+        return 0;
+    }
+
+    ok = fread(pixels, 3, pixel_count, f) == pixel_count;
+    fclose(f);
+    if (!ok) {
+        free(pixels);
+        return 0;
+    }
+
+    for (int frame = 0; frame < SPRITE_FRAMES; ++frame) {
+        int frame_y = frame * BOSS_SPRITE_SIZE;
+        for (int anim = 0; anim < BOSS_ANIM_FRAMES; ++anim) {
+            int frame_x = anim * BOSS_SPRITE_SIZE;
+            for (int y = 0; y < BOSS_SPRITE_SIZE; ++y) {
+                for (int x = 0; x < BOSS_SPRITE_SIZE; ++x) {
+                    size_t src = ((size_t)(frame_y + y) * (size_t)width + (size_t)(frame_x + x)) * 3;
+                    boss_sprites[frame][anim][y * BOSS_SPRITE_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
+                }
             }
         }
     }
@@ -1539,6 +1993,359 @@ static int load_wall_decal_atlas(const char *path)
     return 1;
 }
 
+typedef struct {
+    uint32_t tick;
+    uint8_t note;
+    uint8_t velocity;
+    uint8_t on;
+} MidiRawEvent;
+
+typedef struct {
+    uint32_t tick;
+    uint32_t us_per_quarter;
+} MidiTempoEvent;
+
+static uint16_t read_be16(const uint8_t *data)
+{
+    return (uint16_t)((data[0] << 8) | data[1]);
+}
+
+static uint32_t read_be32(const uint8_t *data)
+{
+    return ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | (uint32_t)data[3];
+}
+
+static int read_midi_vlq(const uint8_t *data, size_t end, size_t *pos, uint32_t *value)
+{
+    uint32_t v = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (*pos >= end) {
+            return 0;
+        }
+        uint8_t b = data[(*pos)++];
+        v = (v << 7) | (uint32_t)(b & 0x7Fu);
+        if ((b & 0x80u) == 0) {
+            *value = v;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int append_midi_raw_event(MidiRawEvent **events, int *count, int *capacity, MidiRawEvent event)
+{
+    if (*count >= *capacity) {
+        int next_capacity = *capacity ? *capacity * 2 : 1024;
+        MidiRawEvent *next = realloc(*events, (size_t)next_capacity * sizeof(**events));
+        if (!next) {
+            return 0;
+        }
+        *events = next;
+        *capacity = next_capacity;
+    }
+    (*events)[(*count)++] = event;
+    return 1;
+}
+
+static int append_midi_tempo_event(MidiTempoEvent **events, int *count, int *capacity, MidiTempoEvent event)
+{
+    if (*count >= *capacity) {
+        int next_capacity = *capacity ? *capacity * 2 : 8;
+        MidiTempoEvent *next = realloc(*events, (size_t)next_capacity * sizeof(**events));
+        if (!next) {
+            return 0;
+        }
+        *events = next;
+        *capacity = next_capacity;
+    }
+    (*events)[(*count)++] = event;
+    return 1;
+}
+
+static int compare_midi_raw_events(const void *a, const void *b)
+{
+    const MidiRawEvent *ea = (const MidiRawEvent *)a;
+    const MidiRawEvent *eb = (const MidiRawEvent *)b;
+    if (ea->tick < eb->tick) return -1;
+    if (ea->tick > eb->tick) return 1;
+    if (ea->on != eb->on) return ea->on ? 1 : -1;
+    return (int)ea->note - (int)eb->note;
+}
+
+static int compare_midi_tempo_events(const void *a, const void *b)
+{
+    const MidiTempoEvent *ea = (const MidiTempoEvent *)a;
+    const MidiTempoEvent *eb = (const MidiTempoEvent *)b;
+    if (ea->tick < eb->tick) return -1;
+    if (ea->tick > eb->tick) return 1;
+    return 0;
+}
+
+static int parse_midi_track(const uint8_t *data,
+                            size_t start,
+                            size_t end,
+                            MidiRawEvent **raw_events,
+                            int *raw_count,
+                            int *raw_capacity,
+                            MidiTempoEvent **tempo_events,
+                            int *tempo_count,
+                            int *tempo_capacity)
+{
+    size_t pos = start;
+    uint32_t tick = 0;
+    uint8_t running_status = 0;
+
+    while (pos < end) {
+        uint32_t delta = 0;
+        if (!read_midi_vlq(data, end, &pos, &delta)) {
+            return 0;
+        }
+        tick += delta;
+        if (pos >= end) {
+            return 0;
+        }
+
+        uint8_t status = data[pos];
+        if (status & 0x80u) {
+            pos++;
+            running_status = status;
+        } else if (running_status) {
+            status = running_status;
+        } else {
+            return 0;
+        }
+
+        if (status == 0xFFu) {
+            if (pos >= end) {
+                return 0;
+            }
+            uint8_t meta_type = data[pos++];
+            uint32_t length = 0;
+            if (!read_midi_vlq(data, end, &pos, &length) || pos + length > end) {
+                return 0;
+            }
+            if (meta_type == 0x51u && length == 3) {
+                uint32_t us_per_quarter =
+                    ((uint32_t)data[pos] << 16) | ((uint32_t)data[pos + 1] << 8) | (uint32_t)data[pos + 2];
+                if (!append_midi_tempo_event(tempo_events, tempo_count, tempo_capacity,
+                                             (MidiTempoEvent){tick, us_per_quarter})) {
+                    return 0;
+                }
+            }
+            pos += length;
+            continue;
+        }
+
+        if (status == 0xF0u || status == 0xF7u) {
+            uint32_t length = 0;
+            if (!read_midi_vlq(data, end, &pos, &length) || pos + length > end) {
+                return 0;
+            }
+            pos += length;
+            continue;
+        }
+
+        uint8_t event_type = status & 0xF0u;
+        if (event_type == 0x80u || event_type == 0x90u) {
+            if (pos + 2 > end) {
+                return 0;
+            }
+            uint8_t note = data[pos++];
+            uint8_t velocity = data[pos++];
+            uint8_t on = event_type == 0x90u && velocity > 0;
+            if (!append_midi_raw_event(raw_events, raw_count, raw_capacity,
+                                       (MidiRawEvent){tick, note, velocity, on})) {
+                return 0;
+            }
+        } else if (event_type == 0xA0u || event_type == 0xB0u || event_type == 0xE0u) {
+            if (pos + 2 > end) {
+                return 0;
+            }
+            pos += 2;
+        } else if (event_type == 0xC0u || event_type == 0xD0u) {
+            if (pos + 1 > end) {
+                return 0;
+            }
+            pos += 1;
+        } else {
+            return 0;
+        }
+    }
+    return pos == end;
+}
+
+static double midi_tick_to_seconds(uint32_t tick, const MidiTempoEvent *tempos, int tempo_count, int ticks_per_quarter)
+{
+    uint32_t last_tick = 0;
+    uint32_t tempo = 500000;
+    double seconds = 0.0;
+
+    for (int i = 0; i < tempo_count; ++i) {
+        if (tempos[i].tick > tick) {
+            break;
+        }
+        if (tempos[i].tick > last_tick) {
+            seconds += (double)(tempos[i].tick - last_tick) * (double)tempo / 1000000.0 / (double)ticks_per_quarter;
+            last_tick = tempos[i].tick;
+        }
+        tempo = tempos[i].us_per_quarter;
+    }
+
+    seconds += (double)(tick - last_tick) * (double)tempo / 1000000.0 / (double)ticks_per_quarter;
+    return seconds;
+}
+
+static void free_midi_tracks(void)
+{
+    for (int i = 0; i < MUSIC_TRACK_COUNT; ++i) {
+        free(midi_tracks[i].events);
+    }
+    memset(midi_tracks, 0, sizeof(midi_tracks));
+    memset(midi_voices, 0, sizeof(midi_voices));
+    active_music_track = MUSIC_TRACK_FOREST;
+}
+
+static int load_midi_music(const char *path, MidiMusic *music)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "error: cannot open required MIDI music asset %s: %s\n", path, strerror(errno));
+        return 0;
+    }
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return 0;
+    }
+    long file_size = ftell(f);
+    if (file_size < 22 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return 0;
+    }
+
+    uint8_t *data = malloc((size_t)file_size);
+    if (!data) {
+        fclose(f);
+        return 0;
+    }
+    int ok = fread(data, 1, (size_t)file_size, f) == (size_t)file_size;
+    fclose(f);
+    if (!ok) {
+        free(data);
+        return 0;
+    }
+
+    MidiRawEvent *raw_events = NULL;
+    MidiTempoEvent *tempo_events = NULL;
+    int raw_count = 0;
+    int raw_capacity = 0;
+    int tempo_count = 0;
+    int tempo_capacity = 0;
+
+    size_t pos = 0;
+    if (memcmp(data, "MThd", 4) != 0 || read_be32(data + 4) < 6) {
+        ok = 0;
+    } else {
+        uint16_t format = read_be16(data + 8);
+        uint16_t track_count = read_be16(data + 10);
+        uint16_t division = read_be16(data + 12);
+        uint32_t header_size = read_be32(data + 4);
+        pos = 8u + header_size;
+        if ((format != 0 && format != 1) || track_count == 0 || (division & 0x8000u) != 0 || pos > (size_t)file_size) {
+            ok = 0;
+        } else {
+            int ticks_per_quarter = (int)division;
+            for (uint16_t track = 0; ok && track < track_count; ++track) {
+                if (pos + 8 > (size_t)file_size || memcmp(data + pos, "MTrk", 4) != 0) {
+                    ok = 0;
+                    break;
+                }
+                uint32_t track_size = read_be32(data + pos + 4);
+                pos += 8;
+                if (pos + track_size > (size_t)file_size) {
+                    ok = 0;
+                    break;
+                }
+                ok = parse_midi_track(data, pos, pos + track_size,
+                                      &raw_events, &raw_count, &raw_capacity,
+                                      &tempo_events, &tempo_count, &tempo_capacity);
+                pos += track_size;
+            }
+
+            if (ok) {
+                int has_start_tempo = 0;
+                for (int i = 0; i < tempo_count; ++i) {
+                    if (tempo_events[i].tick == 0) {
+                        has_start_tempo = 1;
+                        break;
+                    }
+                }
+                if (!has_start_tempo &&
+                    !append_midi_tempo_event(&tempo_events, &tempo_count, &tempo_capacity,
+                                             (MidiTempoEvent){0, 500000})) {
+                    ok = 0;
+                }
+            }
+            if (ok && raw_count > 0) {
+                qsort(raw_events, (size_t)raw_count, sizeof(*raw_events), compare_midi_raw_events);
+                qsort(tempo_events, (size_t)tempo_count, sizeof(*tempo_events), compare_midi_tempo_events);
+
+                MidiMusicEvent *events = malloc((size_t)raw_count * sizeof(*events));
+                if (!events) {
+                    ok = 0;
+                } else {
+                    for (int i = 0; i < raw_count; ++i) {
+                        events[i] = (MidiMusicEvent){
+                            midi_tick_to_seconds(raw_events[i].tick, tempo_events, tempo_count, ticks_per_quarter),
+                            raw_events[i].note,
+                            raw_events[i].velocity,
+                            raw_events[i].on,
+                        };
+                    }
+                    free(music->events);
+                    music->events = events;
+                    music->event_count = raw_count;
+                    music->length = events[raw_count - 1].time + 3.0;
+                    music->next_event = 0;
+                    music->playhead = 0.0;
+                }
+            }
+        }
+    }
+
+    free(raw_events);
+    free(tempo_events);
+    free(data);
+
+    if (!ok || music->event_count == 0) {
+        fprintf(stderr, "error: cannot parse required MIDI music asset %s\n", path);
+        free(music->events);
+        memset(music, 0, sizeof(*music));
+        return 0;
+    }
+    return 1;
+}
+
+static int load_music_assets(void)
+{
+    static const char *paths[MUSIC_TRACK_COUNT] = {
+        MUSIC_DIES_IRAE_PATH,
+        MUSIC_TOCCATA_PATH,
+        MUSIC_MASONIC_FUNERAL_PATH,
+        MUSIC_PATHETIQUE_PATH,
+    };
+
+    free_midi_tracks();
+    for (int i = 0; i < MUSIC_TRACK_COUNT; ++i) {
+        if (!load_midi_music(paths[i], &midi_tracks[i])) {
+            free_midi_tracks();
+            return 0;
+        }
+    }
+    set_active_music_track(MUSIC_TRACK_FOREST);
+    return 1;
+}
+
 static int init_assets(void)
 {
     if (!load_texture_atlas(TEXTURE_ATLAS_PATH)) {
@@ -1552,6 +2359,10 @@ static int init_assets(void)
     }
     if (!load_giant_skeleton_atlas(GIANT_SKELETON_ATLAS_PATH)) {
         fprintf(stderr, "error: cannot load required giant skeleton atlas %s\n", GIANT_SKELETON_ATLAS_PATH);
+        return 0;
+    }
+    if (!load_boss_atlas(BOSS_ATLAS_PATH)) {
+        fprintf(stderr, "error: cannot load required boss atlas %s\n", BOSS_ATLAS_PATH);
         return 0;
     }
     if (!load_tree_atlas(TREE_ATLAS_PATH)) {
@@ -1576,6 +2387,9 @@ static int init_assets(void)
     }
     if (!load_wall_decal_atlas(WALL_DECAL_ATLAS_PATH)) {
         fprintf(stderr, "error: cannot load required wall decal atlas %s\n", WALL_DECAL_ATLAS_PATH);
+        return 0;
+    }
+    if (!load_music_assets()) {
         return 0;
     }
     return 1;
@@ -2054,6 +2868,26 @@ static int monster_frame_for_camera(const Camera *cam, const Monster *monster)
     return frame_map[frame & 3];
 }
 
+static int monster_anim_frame_for_monster(const Monster *monster)
+{
+    if (monster->attack_anim_timer > 0.0) {
+        if (monster->attack_anim_timer > 0.24) {
+            return 1;
+        }
+        if (monster->attack_anim_timer > 0.10) {
+            return 2;
+        }
+        return 3;
+    }
+    if (monster->pain_timer > 0.0) {
+        return 3;
+    }
+    if (monster->ai_state == 2) {
+        return ((int)floor((active_game ? active_game->time : 0.0) * 2.8 + monster->route * 0.35) & 1) ? 1 : 0;
+    }
+    return ((int)floor((active_game ? active_game->time : 0.0) * 1.2 + monster->route * 0.25) & 1) ? 3 : 0;
+}
+
 static int project_sprite(const Camera *cam, Vec2 pos, double scale, int *screen_x, int *screen_h, double *depth)
 {
     double sprite_x = pos.x - cam->pos.x;
@@ -2116,9 +2950,11 @@ static void render_monster(const Camera *cam, const Monster *monster)
     if (draw_end_x >= SCREEN_W) draw_end_x = SCREEN_W - 1;
 
     int frame = monster_frame_for_camera(cam, monster);
+    int anim_frame = monster_anim_frame_for_monster(monster);
     int type = monster->type % MONSTER_TYPES;
     if (type < 0) type = 0;
-    int texture_size = monster->type == MONSTER_GIANT_SKELETON ? GIANT_SKELETON_SPRITE_SIZE : SPRITE_SIZE;
+    int texture_size = monster->is_boss ? BOSS_SPRITE_SIZE :
+        (monster->type == MONSTER_GIANT_SKELETON ? GIANT_SKELETON_SPRITE_SIZE : SPRITE_SIZE);
     double light = (monster->is_boss ? 1.22 : 1.0) / (1.0 + depth * 0.055);
 
     for (int stripe = draw_start_x; stripe <= draw_end_x; ++stripe) {
@@ -2138,9 +2974,11 @@ static void render_monster(const Camera *cam, const Monster *monster)
                 continue;
             }
 
-            uint32_t color = monster->type == MONSTER_GIANT_SKELETON
-                ? giant_skeleton_sprites[frame][tex_y * GIANT_SKELETON_SPRITE_SIZE + tex_x]
-                : monster_sprites[type][frame][tex_y * SPRITE_SIZE + tex_x];
+            uint32_t color = monster->is_boss
+                ? boss_sprites[frame][anim_frame][tex_y * BOSS_SPRITE_SIZE + tex_x]
+                : (monster->type == MONSTER_GIANT_SKELETON
+                    ? giant_skeleton_sprites[frame][anim_frame][tex_y * GIANT_SKELETON_SPRITE_SIZE + tex_x]
+                    : monster_sprites[type][frame][anim_frame][tex_y * SPRITE_SIZE + tex_x]);
             if (!is_sprite_key(color)) {
                 uint32_t lit = shade(color, light);
                 if (monster->pain_timer > 0.0) {
@@ -3187,8 +4025,8 @@ static void render_hud(const GameState *game)
         fill_rect(SCREEN_W / 2 - 18, SCREEN_H - 62, 36, 4, rgb(220, 210, 96));
     }
 
-    if (game->victory || game->game_over) {
-        uint32_t c = game->victory ? rgb(232, 196, 64) : rgb(160, 28, 28);
+    if (game->game_over) {
+        uint32_t c = rgb(160, 28, 28);
         fill_rect(SCREEN_W / 2 - 48, 28, 96, 22, rgb(18, 18, 20));
         fill_rect(SCREEN_W / 2 - 44, 32, 88, 14, c);
         fill_rect(SCREEN_W / 2 - 36, 36, 72, 6, rgb(18, 18, 20));
@@ -3343,6 +4181,7 @@ static void render_pause_overlay(void)
 static void render_interaction_prompt(const Camera *cam, const GameState *game);
 static void render_help_overlay(const GameState *game);
 static void render_relic_notice(const GameState *game);
+static void render_victory_screen(void);
 
 static void render_screen_ellipse(int cx, int cy, int rx, int ry, double depth, uint32_t color, double strength)
 {
@@ -3813,6 +4652,9 @@ static void render_scene(const Camera *cam, const GameState *game)
     if (game->show_automap) {
         render_full_automap(cam, game);
         render_hud(game);
+    }
+    if (game->victory) {
+        render_victory_screen();
     }
     if (profile) {
         profile->total_ms = elapsed_ms(total_start, SDL_GetPerformanceCounter());
@@ -4837,9 +5679,10 @@ static void place_generated_monsters(GameState *game, LevelRng *rng, int boss_ro
         monster->strafe_timer = 0.4 + i * 0.11;
         monster->strafe_dir = (i & 1) ? 1 : -1;
         monster->pain_timer = 0.0;
+        monster->attack_anim_timer = 0.0;
         monster->is_boss = boss_room && i == game->monster_count - 1;
         if (monster->is_boss) {
-            monster->type = 0;
+            monster->type = MONSTER_BOSS_BUTCHER;
             monster->hp = scale_monster_hp_for_difficulty(BOSS_HP, game->difficulty);
         }
     }
@@ -4991,9 +5834,10 @@ static void init_game_seed(GameState *game, uint32_t seed, int mode)
     torch_flicker_cache_ready = 0;
     game->generator_mode = mode;
     game->difficulty = normalize_difficulty(runtime_difficulty);
+    game->trainer = runtime_trainer ? 1 : 0;
     game->player_health = PLAYER_MAX_HEALTH;
-    game->ammo = START_AMMO;
-    game->fireball_ammo = START_FIREBALL_AMMO;
+    game->ammo = game->trainer ? 99 : START_AMMO;
+    game->fireball_ammo = game->trainer ? MAX_FIREBALL_AMMO : START_FIREBALL_AMMO;
     game->selected_weapon = WEAPON_KNIFE;
     game->pistol_unlocked = 0;
     game->fireball_unlocked = 0;
@@ -5001,6 +5845,12 @@ static void init_game_seed(GameState *game, uint32_t seed, int mode)
     game->help_timer = 7.0;
     sync_relic_progress(game);
     generate_level(game, seed, mode);
+    if (game->trainer) {
+        game->relic_mask = RELIC_MASK_ALL;
+        sync_relic_progress(game);
+    }
+    set_active_music_track(mode == GENERATOR_FOREST ? MUSIC_TRACK_FOREST :
+                           (mode == GENERATOR_BOSS ? MUSIC_TRACK_TOCCATA : MUSIC_TRACK_DIES_IRAE));
 }
 
 static void init_game(GameState *game)
@@ -5461,7 +6311,7 @@ static void update_projectiles(GameState *game, const Camera *cam, double dt)
             continue;
         }
 
-        if (p->owner == PROJECTILE_OWNER_ENEMY) {
+        if (p->owner == PROJECTILE_OWNER_ENEMY && !game->victory && !game->game_over) {
             double dx = p->pos.x - cam->pos.x;
             double dy = p->pos.y - cam->pos.y;
             if (dx * dx + dy * dy < 0.18 && game->hit_flash <= 0.0) {
@@ -5628,80 +6478,7 @@ static int portal_matches(const Portal *portal, int tx, int ty, int px, int py)
 
 static uint8_t prompt_glyph(char c, int row)
 {
-    static const uint8_t glyph_0[7] = {14, 17, 19, 21, 25, 17, 14};
-    static const uint8_t glyph_1[7] = {4, 12, 4, 4, 4, 4, 14};
-    static const uint8_t glyph_2[7] = {14, 17, 1, 2, 4, 8, 31};
-    static const uint8_t glyph_3[7] = {30, 1, 1, 14, 1, 1, 30};
-    static const uint8_t glyph_4[7] = {2, 6, 10, 18, 31, 2, 2};
-    static const uint8_t glyph_5[7] = {31, 16, 16, 30, 1, 1, 30};
-    static const uint8_t glyph_6[7] = {14, 16, 16, 30, 17, 17, 14};
-    static const uint8_t glyph_7[7] = {31, 1, 2, 4, 8, 8, 8};
-    static const uint8_t glyph_8[7] = {14, 17, 17, 14, 17, 17, 14};
-    static const uint8_t glyph_9[7] = {14, 17, 17, 15, 1, 1, 14};
-    static const uint8_t glyph_dot[7] = {0, 0, 0, 0, 0, 12, 12};
-    static const uint8_t glyph_slash[7] = {1, 1, 2, 4, 8, 16, 16};
-    static const uint8_t glyph_a[7] = {14, 17, 17, 31, 17, 17, 17};
-    static const uint8_t glyph_b[7] = {30, 17, 17, 30, 17, 17, 30};
-    static const uint8_t glyph_c[7] = {14, 17, 16, 16, 16, 17, 14};
-    static const uint8_t glyph_d[7] = {30, 17, 17, 17, 17, 17, 30};
-    static const uint8_t glyph_f[7] = {30, 16, 16, 30, 16, 16, 16};
-    static const uint8_t glyph_g[7] = {14, 17, 16, 23, 17, 17, 14};
-    static const uint8_t glyph_h[7] = {17, 17, 17, 31, 17, 17, 17};
-    static const uint8_t glyph_i[7] = {14, 4, 4, 4, 4, 4, 14};
-    static const uint8_t glyph_w[7] = {17, 17, 17, 21, 21, 21, 10};
-    static const uint8_t glyph_e[7] = {31, 16, 16, 30, 16, 16, 31};
-    static const uint8_t glyph_j[7] = {7, 2, 2, 2, 2, 18, 12};
-    static const uint8_t glyph_k[7] = {17, 18, 20, 24, 20, 18, 17};
-    static const uint8_t glyph_l[7] = {16, 16, 16, 16, 16, 16, 31};
-    static const uint8_t glyph_m[7] = {17, 27, 21, 21, 17, 17, 17};
-    static const uint8_t glyph_n[7] = {17, 25, 21, 19, 17, 17, 17};
-    static const uint8_t glyph_o[7] = {14, 17, 17, 17, 17, 17, 14};
-    static const uint8_t glyph_p[7] = {30, 17, 17, 30, 16, 16, 16};
-    static const uint8_t glyph_r[7] = {30, 17, 17, 30, 20, 18, 17};
-    static const uint8_t glyph_s[7] = {15, 16, 16, 14, 1, 1, 30};
-    static const uint8_t glyph_t[7] = {31, 4, 4, 4, 4, 4, 4};
-    static const uint8_t glyph_u[7] = {17, 17, 17, 17, 17, 17, 14};
-    static const uint8_t glyph_y[7] = {17, 17, 10, 4, 4, 4, 4};
-    static const uint8_t glyph_z[7] = {31, 1, 2, 4, 8, 16, 31};
-
-    switch (c) {
-    case '0': return glyph_0[row];
-    case '1': return glyph_1[row];
-    case '2': return glyph_2[row];
-    case '3': return glyph_3[row];
-    case '4': return glyph_4[row];
-    case '5': return glyph_5[row];
-    case '6': return glyph_6[row];
-    case '7': return glyph_7[row];
-    case '8': return glyph_8[row];
-    case '9': return glyph_9[row];
-    case '.': return glyph_dot[row];
-    case '/': return glyph_slash[row];
-    case 'A': return glyph_a[row];
-    case 'B': return glyph_b[row];
-    case 'C': return glyph_c[row];
-    case 'D': return glyph_d[row];
-    case 'E': return glyph_e[row];
-    case 'F': return glyph_f[row];
-    case 'G': return glyph_g[row];
-    case 'H': return glyph_h[row];
-    case 'I': return glyph_i[row];
-    case 'J': return glyph_j[row];
-    case 'K': return glyph_k[row];
-    case 'L': return glyph_l[row];
-    case 'M': return glyph_m[row];
-    case 'N': return glyph_n[row];
-    case 'O': return glyph_o[row];
-    case 'P': return glyph_p[row];
-    case 'R': return glyph_r[row];
-    case 'S': return glyph_s[row];
-    case 'T': return glyph_t[row];
-    case 'U': return glyph_u[row];
-    case 'W': return glyph_w[row];
-    case 'Y': return glyph_y[row];
-    case 'Z': return glyph_z[row];
-    default: return 0;
-    }
+    return prompt_font_glyph(c, row);
 }
 
 static void draw_prompt_text(int x, int y, const char *text, uint32_t color)
@@ -5848,7 +6625,11 @@ static void render_interaction_prompt(const Camera *cam, const GameState *game)
 {
     const Portal *portal = active_portal_prompt(game, cam);
     if (portal) {
-        render_interaction_label(portal->exit_to_forest ? "F WYJSCIE" : "F WEJSCIE");
+        if (portal->boss_gate && !game->boss_unlocked) {
+            render_interaction_label("BRAK RELIKWII");
+        } else {
+            render_interaction_label(portal->exit_to_forest ? "F WYJSCIE" : "F WEJSCIE");
+        }
         return;
     }
 
@@ -5883,6 +6664,23 @@ static void render_centered_prompt_line(int y, const char *text, uint32_t color)
     render_centered_prompt_line_styled(y, text, color, 0, 0);
 }
 
+static void render_victory_screen(void)
+{
+    int w = 304;
+    int h = 132;
+    int x = SCREEN_W / 2 - w / 2;
+    int y = SCREEN_H / 2 - h / 2 - 8;
+    blend_rect(0, 0, SCREEN_W, SCREEN_H, rgb(0, 0, 0), 0.42);
+    blend_rect(x, y, w, h, rgb(6, 5, 4), 0.86);
+    blend_rect(x + 3, y + 3, w - 6, h - 6, rgb(78, 46, 24), 0.32);
+    fill_rect(x + 20, y + 36, w - 40, 1, rgb(188, 130, 48));
+    fill_rect(x + 20, y + h - 34, w - 40, 1, rgb(104, 72, 42));
+    render_centered_prompt_line(y + 14, "GRATULACJE", rgb(246, 224, 158));
+    render_centered_prompt_line(y + 48, "BOSS POKONANY", rgb(238, 178, 54));
+    render_centered_prompt_line(y + 72, "DIOOM UKONCZONY", rgb(218, 202, 160));
+    render_centered_prompt_line(y + 102, "R RESTART ESC MENU", rgb(150, 132, 100));
+}
+
 static void render_help_overlay(const GameState *game)
 {
     if (game->help_timer <= 0.0 && !game->show_help) {
@@ -5905,15 +6703,37 @@ static void render_help_overlay(const GameState *game)
 }
 
 enum {
-    MENU_ITEM_PLAY = 0,
-    MENU_ITEM_RESTART,
-    MENU_ITEM_DIFFICULTY,
-    MENU_ITEM_QUALITY,
-    MENU_ITEM_POST,
-    MENU_ITEM_FULLSCREEN,
-    MENU_ITEM_EXIT,
-    MENU_ITEM_COUNT
+    MENU_PAGE_MAIN = 0,
+    MENU_PAGE_SETTINGS,
+    MENU_PAGE_SAVE,
+    MENU_PAGE_LOAD
 };
+
+enum {
+    MAIN_MENU_ITEM_PLAY = 0,
+    MAIN_MENU_ITEM_RESTART,
+    MAIN_MENU_ITEM_SAVE,
+    MAIN_MENU_ITEM_LOAD,
+    MAIN_MENU_ITEM_SETTINGS,
+    MAIN_MENU_ITEM_EXIT,
+    MAIN_MENU_ITEM_COUNT
+};
+
+enum {
+    SETTINGS_MENU_ITEM_DIFFICULTY = 0,
+    SETTINGS_MENU_ITEM_QUALITY,
+    SETTINGS_MENU_ITEM_POST,
+    SETTINGS_MENU_ITEM_SFX_VOLUME,
+    SETTINGS_MENU_ITEM_MUSIC_VOLUME,
+    SETTINGS_MENU_ITEM_FULLSCREEN,
+    SETTINGS_MENU_ITEM_BACK,
+    SETTINGS_MENU_ITEM_COUNT
+};
+
+#define SLOT_MENU_ITEM_BACK SAVEGAME_SLOT_COUNT
+#define SLOT_MENU_ITEM_COUNT (SAVEGAME_SLOT_COUNT + 1)
+
+static void save_slot_menu_label(int slot, char *out, size_t out_size);
 
 static void render_menu_item(int y, const char *text, int selected, uint32_t color)
 {
@@ -5932,28 +6752,150 @@ static void render_menu_item(int y, const char *text, int selected, uint32_t col
     draw_prompt_text(text_x, y, text, color);
 }
 
-static void render_game_menu(int selected, int game_started, int difficulty, int quality, int effects, int fullscreen)
+static void render_menu_slider(int y, const char *label, int value, int selected, uint32_t color)
 {
-    const char *items[MENU_ITEM_COUNT] = {
+    int item_w = 252;
+    int item_h = 26;
+    int item_x = SCREEN_W / 2 - item_w / 2;
+    int label_x = item_x + 18;
+    int bar_x = item_x + 112;
+    int bar_y = y + 6;
+    int slot_w = 8;
+    int slot_gap = 3;
+    char value_text[4];
+
+    if (selected) {
+        blend_rect(item_x, y - 5, item_w, item_h, rgb(92, 66, 34), 0.56);
+        blend_rect(item_x + 2, y - 3, item_w - 4, item_h - 4, rgb(176, 108, 42), 0.20);
+        fill_rect(item_x - 10, y + 2, 4, 12, rgb(238, 178, 54));
+        fill_rect(item_x + item_w + 6, y + 2, 4, 12, rgb(238, 178, 54));
+    }
+
+    value = clamp_volume_step(value);
+    draw_prompt_text(label_x + 1, y + 1, label, rgb(16, 12, 10));
+    draw_prompt_text(label_x, y, label, color);
+    for (int i = 0; i < AUDIO_VOLUME_STEPS; ++i) {
+        uint32_t slot_color = i < value ? color : rgb(66, 54, 42);
+        fill_rect(bar_x + i * (slot_w + slot_gap), bar_y, slot_w, 7, slot_color);
+        if (selected && i < value) {
+            fill_rect(bar_x + i * (slot_w + slot_gap), bar_y - 2, slot_w, 1, rgb(255, 218, 126));
+        }
+    }
+    snprintf(value_text, sizeof(value_text), "%02d", value);
+    draw_prompt_text(item_x + item_w - 38, y + 1, value_text, rgb(16, 12, 10));
+    draw_prompt_text(item_x + item_w - 39, y, value_text, color);
+}
+
+static int menu_item_count_for_page(int page)
+{
+    if (page == MENU_PAGE_SETTINGS) {
+        return SETTINGS_MENU_ITEM_COUNT;
+    }
+    if (page == MENU_PAGE_SAVE || page == MENU_PAGE_LOAD) {
+        return SLOT_MENU_ITEM_COUNT;
+    }
+    return MAIN_MENU_ITEM_COUNT;
+}
+
+static const char *menu_item_description(int page, int item)
+{
+    if (page == MENU_PAGE_SAVE || page == MENU_PAGE_LOAD) {
+        if (item == SLOT_MENU_ITEM_BACK) {
+            return "WROC DO MENU";
+        }
+        return page == MENU_PAGE_SAVE ? "ZAPISZ W SLOCIE" : "WCZYTAJ SLOT";
+    }
+
+    if (page == MENU_PAGE_SETTINGS) {
+        switch (item) {
+        case SETTINGS_MENU_ITEM_DIFFICULTY:
+            return "HP I OBRAZENIA WROGOW";
+        case SETTINGS_MENU_ITEM_QUALITY:
+            return "PBR LADNIE FAST SZYBKO";
+        case SETTINGS_MENU_ITEM_POST:
+            return "BLOOM AA KOLOR";
+        case SETTINGS_MENU_ITEM_SFX_VOLUME:
+            return "GLOSNOSC EFEKTOW";
+        case SETTINGS_MENU_ITEM_MUSIC_VOLUME:
+            return "GLOSNOSC MUZYKI";
+        case SETTINGS_MENU_ITEM_FULLSCREEN:
+            return "PELNY EKRAN";
+        case SETTINGS_MENU_ITEM_BACK:
+            return "WROC DO MENU";
+        default:
+            return "";
+        }
+    }
+
+    switch (item) {
+    case MAIN_MENU_ITEM_PLAY:
+        return "START LUB WROC DO GRY";
+    case MAIN_MENU_ITEM_RESTART:
+        return "NOWY RUN I NOWY SEED";
+    case MAIN_MENU_ITEM_SAVE:
+        return "WYBIERZ SLOT ZAPISU";
+    case MAIN_MENU_ITEM_LOAD:
+        return "WYBIERZ SLOT ODCZYTU";
+    case MAIN_MENU_ITEM_SETTINGS:
+        return "OPCJE GRY";
+    case MAIN_MENU_ITEM_EXIT:
+        return "ZAMKNIJ GRE";
+    default:
+        return "";
+    }
+}
+
+static void render_game_menu(int page,
+                             int selected,
+                             int game_started,
+                             int difficulty,
+                             int quality,
+                             int effects,
+                             int sfx_volume_value,
+                             int music_volume_value,
+                             int fullscreen)
+{
+    char slot_items[SLOT_MENU_ITEM_COUNT][32];
+    const char *slot_item_ptrs[SLOT_MENU_ITEM_COUNT];
+    const char *main_items[MAIN_MENU_ITEM_COUNT] = {
         game_started ? "WZNOW GRE" : "START GRY",
         "RESTART",
+        "ZAPISZ GRE",
+        "WCZYTAJ GRE",
+        "USTAWIENIA",
+        "WYJSCIE",
+    };
+    const char *settings_items[SETTINGS_MENU_ITEM_COUNT] = {
         difficulty_menu_text(difficulty),
         quality == RENDER_QUALITY_FAST ? "JAKOSC FAST" : "JAKOSC PBR",
         effects == RENDER_EFFECTS_FULL ? "POST ON" : "POST OFF",
+        "EFEKTY",
+        "MUZYKA",
         fullscreen ? "FULLSCREEN ON" : "FULLSCREEN OFF",
-        "WYJSCIE",
+        "WROC",
     };
+    const char **items = page == MENU_PAGE_SETTINGS ? settings_items : main_items;
+    int item_count = menu_item_count_for_page(page);
     int w = 328;
-    int h = 360;
+    int h = page == MENU_PAGE_SETTINGS ? 344 : (page == MENU_PAGE_SAVE || page == MENU_PAGE_LOAD ? 408 : 336);
     int x = SCREEN_W / 2 - w / 2;
     int y = SCREEN_H / 2 - h / 2;
+    if (page == MENU_PAGE_SAVE || page == MENU_PAGE_LOAD) {
+        for (int i = 0; i < SAVEGAME_SLOT_COUNT; ++i) {
+            save_slot_menu_label(i, slot_items[i], sizeof(slot_items[i]));
+            slot_item_ptrs[i] = slot_items[i];
+        }
+        snprintf(slot_items[SLOT_MENU_ITEM_BACK], sizeof(slot_items[SLOT_MENU_ITEM_BACK]), "WROC");
+        slot_item_ptrs[SLOT_MENU_ITEM_BACK] = slot_items[SLOT_MENU_ITEM_BACK];
+        items = slot_item_ptrs;
+    }
     if (y < 8) {
         y = 8;
     }
     if (selected < 0) {
         selected = 0;
-    } else if (selected >= MENU_ITEM_COUNT) {
-        selected = MENU_ITEM_COUNT - 1;
+    } else if (selected >= item_count) {
+        selected = item_count - 1;
     }
 
     blend_rect(0, 0, SCREEN_W, SCREEN_H, rgb(0, 0, 0), 0.55);
@@ -5962,28 +6904,56 @@ static void render_game_menu(int selected, int game_started, int difficulty, int
     fill_rect(x + 18, y + 34, w - 36, 1, rgb(112, 82, 42));
     fill_rect(x + 18, y + h - 45, w - 36, 1, rgb(78, 58, 36));
 
-    render_centered_prompt_line(y + 14, "RAYCASTER", rgb(238, 214, 146));
-    for (int i = 0; i < MENU_ITEM_COUNT; ++i) {
+    const char *title = "DIOOM";
+    if (page == MENU_PAGE_SETTINGS) {
+        title = "USTAWIENIA";
+    } else if (page == MENU_PAGE_SAVE) {
+        title = "ZAPIS GRY";
+    } else if (page == MENU_PAGE_LOAD) {
+        title = "ODCZYT GRY";
+    }
+    render_centered_prompt_line(y + 14, title, rgb(238, 214, 146));
+    for (int i = 0; i < item_count; ++i) {
         uint32_t color = selected == i ? rgb(246, 224, 158) : rgb(198, 184, 146);
-        if (i == MENU_ITEM_DIFFICULTY || i == MENU_ITEM_QUALITY || i == MENU_ITEM_POST || i == MENU_ITEM_FULLSCREEN) {
+        if (page == MENU_PAGE_SETTINGS && i != SETTINGS_MENU_ITEM_BACK) {
             color = selected == i ? rgb(255, 196, 74) : rgb(210, 156, 66);
-        } else if (i == MENU_ITEM_EXIT) {
+        } else if ((page == MENU_PAGE_SAVE || page == MENU_PAGE_LOAD) && i != SLOT_MENU_ITEM_BACK) {
+            color = selected == i ? rgb(255, 196, 74) : rgb(210, 156, 66);
+        } else if (page == MENU_PAGE_MAIN && (i == MAIN_MENU_ITEM_SAVE || i == MAIN_MENU_ITEM_LOAD)) {
+            color = selected == i ? rgb(255, 196, 74) : rgb(210, 156, 66);
+        } else if ((page == MENU_PAGE_MAIN && i == MAIN_MENU_ITEM_EXIT) ||
+                   (page == MENU_PAGE_SETTINGS && i == SETTINGS_MENU_ITEM_BACK) ||
+                   ((page == MENU_PAGE_SAVE || page == MENU_PAGE_LOAD) && i == SLOT_MENU_ITEM_BACK)) {
             color = selected == i ? rgb(238, 142, 112) : rgb(184, 116, 94);
         }
-        render_menu_item(y + 64 + i * 36, items[i], selected == i, color);
+        int item_y = y + 58 + i * 32;
+        if (page == MENU_PAGE_SETTINGS && i == SETTINGS_MENU_ITEM_SFX_VOLUME) {
+            render_menu_slider(item_y, items[i], sfx_volume_value, selected == i, color);
+        } else if (page == MENU_PAGE_SETTINGS && i == SETTINGS_MENU_ITEM_MUSIC_VOLUME) {
+            render_menu_slider(item_y, items[i], music_volume_value, selected == i, color);
+        } else {
+            render_menu_item(item_y, items[i], selected == i, color);
+        }
     }
 
+    render_centered_prompt_line(y + h - 62, menu_item_description(page, selected), rgb(174, 156, 112));
     render_centered_prompt_line(y + h - 34, "W/S WYBOR ENTER AKCJA", rgb(148, 132, 100));
-    render_centered_prompt_line(y + h - 18, game_started ? "A/D ZMIANA ESC WROC" : "A/D ZMIANA ESC WYJSCIE", rgb(116, 106, 86));
+    const char *footer = game_started ? "ESC WROC" : "ESC WYJSCIE";
+    if (page == MENU_PAGE_SETTINGS) {
+        footer = "A/D ZMIANA ESC WROC";
+    } else if (page == MENU_PAGE_SAVE || page == MENU_PAGE_LOAD) {
+        footer = "ENTER SLOT ESC WROC";
+    }
+    render_centered_prompt_line(y + h - 18, footer, rgb(116, 106, 86));
 }
 
 static void render_relic_notice(const GameState *game)
 {
-    if (game->relic_flash <= 0.0 || game->relic_notice_count <= 0) {
+    if (game->relic_flash <= 0.0) {
         return;
     }
 
-    int count = game->relic_notice_count;
+    int count = game->relic_notice_count > 0 ? game->relic_notice_count : game->relic_count;
     if (count > RELIC_COUNT) {
         count = RELIC_COUNT;
     }
@@ -5993,6 +6963,20 @@ static void render_relic_notice(const GameState *game)
         (char)('0' + RELIC_COUNT),
         '\0',
     };
+    if (game->relic_notice_count <= 0) {
+        int x = SCREEN_W / 2 - 98;
+        int y = 104;
+        int w = 196;
+        int h = 62;
+        double fade = clamp01(game->relic_flash / 1.45);
+        blend_rect(x, y, w, h, rgb(8, 4, 12), 0.38 * fade);
+        blend_rect(x + 2, y + 2, w - 4, h - 4, rgb(74, 42, 94), 0.24 * fade);
+        render_centered_prompt_line(y + 8, "BRAMA BOSSA", rgb(242, 220, 154));
+        render_centered_prompt_line(y + 26, "ZBIERZ RELIKWIE", rgb(238, 210, 146));
+        render_centered_prompt_line(y + 44, progress, rgb(190, 168, 124));
+        return;
+    }
+
     int x = SCREEN_W / 2 - 58;
     int y = 112;
     int w = 116;
@@ -6026,6 +7010,7 @@ static void copy_player_progress(GameState *dst, const GameState *src)
     dst->rapid_timer = src->rapid_timer;
     dst->damage_timer = src->damage_timer;
     dst->difficulty = src->difficulty;
+    dst->trainer = src->trainer;
 }
 
 static void enter_dungeon_from_forest(GameState *game, Camera *cam, const Portal *portal)
@@ -6052,6 +7037,7 @@ static void enter_dungeon_from_forest(GameState *game, Camera *cam, const Portal
     sync_relic_progress(game);
     place_dungeon_exit_portal(game);
     place_dungeon_relic(game);
+    set_active_music_track(music_track_for_relic(relic_index));
     *cam = (Camera){
         .pos = {2.5, 22.5},
         .dir = {1.0, 0.0},
@@ -6076,6 +7062,7 @@ static void return_to_saved_forest(GameState *game, Camera *cam)
     sync_relic_progress(game);
     reveal_fog(game, cam);
     saved_forest.valid = 0;
+    set_active_music_track(MUSIC_TRACK_FOREST);
     play_sfx(SFX_PORTAL, 0.52);
 }
 
@@ -6095,7 +7082,8 @@ static void interact_world(GameState *game, Camera *cam)
             return_to_saved_forest(game, cam);
         } else if (game->generator_mode == GENERATOR_FOREST) {
             if (portal->boss_gate && !game->boss_unlocked) {
-                game->relic_flash = 0.45;
+                game->relic_flash = 1.45;
+                game->relic_notice_count = 0;
                 play_sfx(SFX_LOCKED, 0.42);
                 return;
             }
@@ -6135,14 +7123,16 @@ static void player_fire(GameState *game, const Camera *cam)
     }
 
     if (game->selected_weapon == WEAPON_FIREBALL) {
-        if (!game->fireball_unlocked || game->fireball_ammo <= 0) {
+        if (!game->fireball_unlocked || (!game->trainer && game->fireball_ammo <= 0)) {
             return;
         }
         if (!spawn_player_fireball(game, cam)) {
             return;
         }
         play_sfx(SFX_FIREBALL, 0.62);
-        game->fireball_ammo -= 1;
+        if (!game->trainer) {
+            game->fireball_ammo -= 1;
+        }
         game->shot_cooldown = game->rapid_timer > 0.0 ? FIREBALL_COOLDOWN_TIME * 0.70 : FIREBALL_COOLDOWN_TIME;
         game->weapon_flash = FIREBALL_FLASH_TIME;
         game->shot_trace = 0.0;
@@ -6198,11 +7188,13 @@ static void player_fire(GameState *game, const Camera *cam)
     if (!game->pistol_unlocked) {
         return;
     }
-    if (game->ammo <= 0) {
+    if (!game->trainer && game->ammo <= 0) {
         return;
     }
 
-    game->ammo -= 1;
+    if (!game->trainer) {
+        game->ammo -= 1;
+    }
     play_sfx(SFX_PISTOL, 0.50);
     game->shot_cooldown = game->rapid_timer > 0.0 ? SHOT_COOLDOWN_TIME * 0.48 : SHOT_COOLDOWN_TIME;
     game->weapon_flash = WEAPON_FLASH_TIME;
@@ -6248,6 +7240,7 @@ static void update_game(GameState *game, const Camera *cam, double dt)
 {
     game->time += dt;
     reveal_fog(game, cam);
+    int combat_active = !game->victory && !game->game_over;
 
     for (int i = 0; i < MAX_DOORS; ++i) {
         Door *door = &game->doors[i];
@@ -6273,7 +7266,9 @@ static void update_game(GameState *game, const Camera *cam, double dt)
 
     for (int i = 0; i < game->monster_count; ++i) {
         Monster *monster = &game->monsters[i];
-        update_monster(game, i, cam, dt);
+        if (combat_active) {
+            update_monster(game, i, cam, dt);
+        }
         if (monster->facing_lock > 0.0) {
             monster->facing_lock -= dt;
             if (monster->facing_lock < 0.0) {
@@ -6286,8 +7281,17 @@ static void update_game(GameState *game, const Camera *cam, double dt)
                 monster->pain_timer = 0.0;
             }
         }
+        if (monster->attack_anim_timer > 0.0) {
+            monster->attack_anim_timer -= dt;
+            if (monster->attack_anim_timer < 0.0) {
+                monster->attack_anim_timer = 0.0;
+            }
+        }
 
         if (!monster->active) {
+            continue;
+        }
+        if (!combat_active) {
             continue;
         }
         monster->shoot_timer -= dt;
@@ -6305,6 +7309,7 @@ static void update_game(GameState *game, const Camera *cam, double dt)
                 cam->pos.y - monster->pos.y,
             });
             monster->facing_lock = 0.45;
+            monster->attack_anim_timer = monster->is_boss ? 0.42 : 0.34;
             if ((monster_uses_projectile(monster->type) || monster->is_boss) &&
                 player_dist < (monster->is_boss ? 7.2 : 8.0) &&
                 (!monster->is_boss || player_dist > 1.35)) {
@@ -6937,7 +7942,7 @@ static int verify_monster_roles(void)
     for (int i = 0; i < game.monster_count; ++i) {
         Monster *monster = &game.monsters[i];
         if (monster->is_boss) {
-            if (monster->type != 0 || monster->hp != 18) {
+            if (monster->type != MONSTER_BOSS_BUTCHER || monster->hp != scale_monster_hp_for_difficulty(BOSS_HP, game.difficulty)) {
                 fprintf(stderr, "error: boss monster role is not deterministic\n");
                 return 0;
             }
@@ -7132,7 +8137,7 @@ static int verify_generator_modes(void)
         }
         if (mode == GENERATOR_BOSS) {
             Monster *boss = &game.monsters[game.monster_count - 1];
-            if (!boss->is_boss || boss->hp != BOSS_HP ||
+            if (!boss->is_boss || boss->type != MONSTER_BOSS_BUTCHER || boss->hp != BOSS_HP ||
                 boss->pos.x < 15.0 || boss->pos.x > 23.0 ||
                 boss->pos.y < 1.0 || boss->pos.y > 8.0 ||
                 !game.doors[0].locked || game.doors[0].x != 18 || game.doors[0].y != 8) {
@@ -7269,7 +8274,8 @@ static int verify_relic_story_progress(void)
         return 0;
     }
     interact_world(&game, &cam);
-    if (saved_forest.valid || game.generator_mode != GENERATOR_FOREST || game.relic_flash <= 0.0) {
+    if (saved_forest.valid || game.generator_mode != GENERATOR_FOREST ||
+        game.relic_flash <= 1.0 || game.relic_notice_count != 0) {
         fprintf(stderr, "error: locked boss gate allowed entry or gave no feedback\n");
         return 0;
     }
@@ -7289,6 +8295,10 @@ static int verify_relic_story_progress(void)
     interact_world(&game, &cam);
     if (!saved_forest.valid || !game.in_dungeon || game.dungeon_relic_index != relic_index) {
         fprintf(stderr, "error: relic dungeon did not preserve relic index\n");
+        return 0;
+    }
+    if (active_music_track != music_track_for_relic(relic_index)) {
+        fprintf(stderr, "error: relic dungeon did not switch to its music track\n");
         return 0;
     }
 
@@ -7341,6 +8351,10 @@ static int verify_relic_story_progress(void)
         fprintf(stderr, "error: returning to forest lost relic progress\n");
         return 0;
     }
+    if (active_music_track != MUSIC_TRACK_FOREST) {
+        fprintf(stderr, "error: returning to forest did not restore forest music\n");
+        return 0;
+    }
 
     if (!setup_interaction_camera(&cam, game.portals[portal_index].x, game.portals[portal_index].y)) {
         fprintf(stderr, "error: relic dungeon re-entry is not interactable\n");
@@ -7368,6 +8382,10 @@ static int verify_relic_story_progress(void)
         fprintf(stderr, "error: unlocked boss gate did not enter boss level\n");
         return 0;
     }
+    if (active_music_track != MUSIC_TRACK_TOCCATA) {
+        fprintf(stderr, "error: boss gate did not switch to boss music\n");
+        return 0;
+    }
 
     GameState normal;
     init_game(&normal);
@@ -7389,7 +8407,57 @@ static int verify_relic_story_progress(void)
         fprintf(stderr, "error: boss death did not trigger victory\n");
         return 0;
     }
+    int active_explosion = -1;
+    for (int i = 0; i < MAX_PROJECTILES; ++i) {
+        if (boss_game.projectiles[i].active && boss_game.projectiles[i].type == PROJECTILE_EXPLOSION) {
+            active_explosion = i;
+            break;
+        }
+    }
+    if (active_explosion < 0) {
+        fprintf(stderr, "error: boss death did not spawn a victory explosion\n");
+        return 0;
+    }
+    double explosion_life = boss_game.projectiles[active_explosion].life;
+    Camera boss_cam = {
+        .pos = {2.5, 22.5},
+        .dir = {1.0, 0.0},
+        .plane = {0.0, 0.66},
+    };
+    update_game(&boss_game, &boss_cam, 1.0 / 60.0);
+    if (!boss_game.victory || boss_game.game_over || boss_game.projectiles[active_explosion].life >= explosion_life) {
+        fprintf(stderr, "error: victory state did not keep post-boss effects responsive\n");
+        return 0;
+    }
 
+    return 1;
+}
+
+static int verify_music_track_mapping(void)
+{
+    int seen = 0;
+    for (int relic = 0; relic < RELIC_COUNT; ++relic) {
+        int track = music_track_for_relic(relic);
+        if (track < 0 || track >= MUSIC_TRACK_COUNT || (seen & (1 << track))) {
+            fprintf(stderr, "error: relic music track mapping is not unique\n");
+            return 0;
+        }
+        if (!midi_tracks[track].events || midi_tracks[track].event_count <= 0) {
+            fprintf(stderr, "error: relic music track %d is not loaded\n", track);
+            return 0;
+        }
+        seen |= 1 << track;
+        set_active_music_track(track);
+        if (active_music_track != track || midi_tracks[track].next_event != 0 || midi_tracks[track].playhead != 0.0) {
+            fprintf(stderr, "error: relic music track %d did not reset cleanly\n", track);
+            return 0;
+        }
+    }
+    set_active_music_track(MUSIC_TRACK_FOREST);
+    if (active_music_track != MUSIC_TRACK_FOREST) {
+        fprintf(stderr, "error: forest music track did not activate\n");
+        return 0;
+    }
     return 1;
 }
 
@@ -7415,6 +8483,168 @@ static int verify_help_key_close(void)
         fprintf(stderr, "error: key press did not close toggled help\n");
         return 0;
     }
+    return 1;
+}
+
+static int verify_prompt_font_glyphs(void)
+{
+    const char *required = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./-:%!";
+    for (const char *c = required; *c; ++c) {
+        int has_pixels = 0;
+        for (int row = 0; row < 7; ++row) {
+            uint8_t bits = prompt_font_glyph(*c, row);
+            if (bits & ~31u) {
+                fprintf(stderr, "error: prompt font glyph %c row %d exceeds 5 pixels\n", *c, row);
+                return 0;
+            }
+            if (bits) {
+                has_pixels = 1;
+            }
+        }
+        if (!has_pixels) {
+            fprintf(stderr, "error: prompt font glyph %c is missing\n", *c);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int verify_difficulty_scaling(void)
+{
+    int easy_hp = scale_monster_hp_for_difficulty(100, DIFFICULTY_EASY);
+    int normal_hp = scale_monster_hp_for_difficulty(100, DIFFICULTY_NORMAL);
+    int hard_hp = scale_monster_hp_for_difficulty(100, DIFFICULTY_HARD);
+    int nightmare_hp = scale_monster_hp_for_difficulty(100, DIFFICULTY_NIGHTMARE);
+    if (!(easy_hp < normal_hp && normal_hp < hard_hp && hard_hp < nightmare_hp)) {
+        fprintf(stderr, "error: difficulty HP scaling is not ordered\n");
+        return 0;
+    }
+
+    GameState game;
+    memset(&game, 0, sizeof(game));
+    game.difficulty = DIFFICULTY_EASY;
+    int easy_damage = scale_enemy_damage_for_difficulty(&game, 20);
+    game.difficulty = DIFFICULTY_NORMAL;
+    int normal_damage = scale_enemy_damage_for_difficulty(&game, 20);
+    game.difficulty = DIFFICULTY_HARD;
+    int hard_damage = scale_enemy_damage_for_difficulty(&game, 20);
+    game.difficulty = DIFFICULTY_NIGHTMARE;
+    int nightmare_damage = scale_enemy_damage_for_difficulty(&game, 20);
+    if (!(easy_damage < normal_damage && normal_damage < hard_damage && hard_damage < nightmare_damage)) {
+        fprintf(stderr, "error: difficulty damage scaling is not ordered\n");
+        return 0;
+    }
+    return 1;
+}
+
+static int verify_boss_sprite_asset(void)
+{
+    for (int frame = 0; frame < SPRITE_FRAMES; ++frame) {
+        for (int anim = 0; anim < BOSS_ANIM_FRAMES; ++anim) {
+            int visible = 0;
+            for (int i = 0; i < BOSS_SPRITE_SIZE * BOSS_SPRITE_SIZE; ++i) {
+                if (!is_sprite_key(boss_sprites[frame][anim][i])) {
+                    visible++;
+                }
+            }
+            if (visible < 900) {
+                fprintf(stderr, "error: boss sprite frame %d anim %d has too few visible pixels\n", frame, anim);
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int verify_monster_sprite_assets(void)
+{
+    for (int type = 0; type < MONSTER_TYPES; ++type) {
+        for (int frame = 0; frame < SPRITE_FRAMES; ++frame) {
+            for (int anim = 0; anim < MONSTER_ANIM_FRAMES; ++anim) {
+                int visible = 0;
+                for (int i = 0; i < SPRITE_SIZE * SPRITE_SIZE; ++i) {
+                    if (!is_sprite_key(monster_sprites[type][frame][anim][i])) {
+                        visible++;
+                    }
+                }
+                if (visible < 120) {
+                    fprintf(stderr, "error: monster sprite type %d frame %d anim %d has too few visible pixels\n", type, frame, anim);
+                    return 0;
+                }
+            }
+        }
+    }
+
+    for (int frame = 0; frame < SPRITE_FRAMES; ++frame) {
+        for (int anim = 0; anim < MONSTER_ANIM_FRAMES; ++anim) {
+            int visible = 0;
+            for (int i = 0; i < GIANT_SKELETON_SPRITE_SIZE * GIANT_SKELETON_SPRITE_SIZE; ++i) {
+                if (!is_sprite_key(giant_skeleton_sprites[frame][anim][i])) {
+                    visible++;
+                }
+            }
+            if (visible < 900) {
+                fprintf(stderr, "error: giant skeleton sprite frame %d anim %d has too few visible pixels\n", frame, anim);
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int verify_trainer_mode(void)
+{
+    int previous_trainer = runtime_trainer;
+    runtime_trainer = 1;
+    GameState game;
+    init_game_seed(&game, LEVEL_TEST_SEED + 1001u, GENERATOR_FOREST);
+    runtime_trainer = previous_trainer;
+
+    if (!game.trainer || game.relic_mask != RELIC_MASK_ALL || game.relic_count != RELIC_COUNT || !game.boss_unlocked) {
+        fprintf(stderr, "error: trainer mode did not start with all relics collected\n");
+        return 0;
+    }
+
+    game.player_health = 23;
+    apply_player_damage(&game, 999);
+    if (game.player_health != 23 || game.game_over) {
+        fprintf(stderr, "error: trainer mode allowed player damage\n");
+        return 0;
+    }
+
+    Camera cam = {
+        .pos = {2.5, 22.5},
+        .dir = {1.0, 0.0},
+        .plane = {0.0, 0.66},
+    };
+    game.pistol_unlocked = 1;
+    game.selected_weapon = WEAPON_PISTOL;
+    game.ammo = 0;
+    game.shot_cooldown = 0.0;
+    player_fire(&game, &cam);
+    if (game.ammo != 0 || game.shot_cooldown <= 0.0) {
+        fprintf(stderr, "error: trainer mode did not allow pistol fire with empty ammo\n");
+        return 0;
+    }
+
+    game.fireball_unlocked = 1;
+    game.selected_weapon = WEAPON_FIREBALL;
+    game.fireball_ammo = 0;
+    game.shot_cooldown = 0.0;
+    memset(game.projectiles, 0, sizeof(game.projectiles));
+    player_fire(&game, &cam);
+    int fireball_spawned = 0;
+    for (int i = 0; i < MAX_PROJECTILES; ++i) {
+        if (game.projectiles[i].active && game.projectiles[i].owner == PROJECTILE_OWNER_PLAYER) {
+            fireball_spawned = 1;
+            break;
+        }
+    }
+    if (game.fireball_ammo != 0 || game.shot_cooldown <= 0.0 || !fireball_spawned) {
+        fprintf(stderr, "error: trainer mode did not allow fireball fire with empty ammo\n");
+        return 0;
+    }
+
     return 1;
 }
 
@@ -7705,7 +8935,25 @@ static int dump_frame_mode(const char *path, int mode)
     if (!verify_relic_story_progress()) {
         return 1;
     }
+    if (!verify_music_track_mapping()) {
+        return 1;
+    }
     if (!verify_help_key_close()) {
+        return 1;
+    }
+    if (!verify_prompt_font_glyphs()) {
+        return 1;
+    }
+    if (!verify_difficulty_scaling()) {
+        return 1;
+    }
+    if (!verify_boss_sprite_asset()) {
+        return 1;
+    }
+    if (!verify_monster_sprite_assets()) {
+        return 1;
+    }
+    if (!verify_trainer_mode()) {
         return 1;
     }
     if (!verify_sprite_sort_order()) {
@@ -7846,8 +9094,15 @@ typedef struct {
     int integer_scale;
     int render_quality;
     int render_effects;
+    int difficulty;
+    int fullscreen;
+    int sfx_volume;
+    int music_volume;
+    int trainer;
     const char *scale_quality;
 } RuntimeConfig;
+
+static int save_settings_file(int difficulty, int quality, int effects, int fullscreen, int sfx_step, int music_step, int trainer);
 
 typedef struct {
     SDL_Window *window;
@@ -7858,6 +9113,7 @@ typedef struct {
     int running;
     int paused;
     int menu_open;
+    int menu_page;
     int menu_selected;
     int game_started;
     int fullscreen;
@@ -7866,6 +9122,10 @@ typedef struct {
     int render_quality;
     int render_effects;
     int difficulty;
+    int sfx_volume;
+    int music_volume;
+    int trainer;
+    int settings_ready;
     int fps_frames;
     uint64_t prev;
     double fps_accum;
@@ -7873,6 +9133,264 @@ typedef struct {
     double frame_ms;
     RenderProfile profile;
 } Runtime;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint64_t saved_at;
+    uint32_t payload_size;
+    uint32_t game_size;
+    uint32_t camera_size;
+    uint32_t saved_level_size;
+    uint32_t map_w;
+    uint32_t map_h;
+    uint32_t torch_count;
+} SaveGameHeader;
+
+typedef struct {
+    uint32_t runtime_level_seed;
+    int runtime_level_mode;
+    int runtime_difficulty;
+    int runtime_trainer;
+    int active_music_track;
+    int game_started;
+    GameState game;
+    Camera camera;
+    int map[MAP_H][MAP_W];
+    Torch torches[MAX_TORCHES];
+    SavedLevel saved_forest;
+} SaveGamePayload;
+
+static void close_slot_menu(Runtime *rt);
+
+static SaveGameHeader savegame_header(uint64_t saved_at)
+{
+    return (SaveGameHeader){
+        .magic = SAVEGAME_MAGIC,
+        .version = SAVEGAME_VERSION,
+        .saved_at = saved_at,
+        .payload_size = (uint32_t)sizeof(SaveGamePayload),
+        .game_size = (uint32_t)sizeof(GameState),
+        .camera_size = (uint32_t)sizeof(Camera),
+        .saved_level_size = (uint32_t)sizeof(SavedLevel),
+        .map_w = MAP_W,
+        .map_h = MAP_H,
+        .torch_count = MAX_TORCHES,
+    };
+}
+
+static int write_exact(FILE *f, const void *data, size_t size)
+{
+    return fwrite(data, 1, size, f) == size;
+}
+
+static int read_exact(FILE *f, void *data, size_t size)
+{
+    return fread(data, 1, size, f) == size;
+}
+
+static int savegame_header_matches(const SaveGameHeader *header)
+{
+    SaveGameHeader expected = savegame_header(0);
+    return header->magic == expected.magic &&
+           header->version == expected.version &&
+           header->payload_size == expected.payload_size &&
+           header->game_size == expected.game_size &&
+           header->camera_size == expected.camera_size &&
+           header->saved_level_size == expected.saved_level_size &&
+           header->map_w == expected.map_w &&
+           header->map_h == expected.map_h &&
+           header->torch_count == expected.torch_count;
+}
+
+static int valid_generator_mode(int mode)
+{
+    return mode >= 0 && mode < GENERATOR_COUNT;
+}
+
+static int valid_music_track(int track)
+{
+    return track >= 0 && track <= MUSIC_TRACK_FOREST;
+}
+
+static int save_slot_path(int slot, int temp, char *path, size_t path_size)
+{
+    if (slot < 0 || slot >= SAVEGAME_SLOT_COUNT) {
+        return 0;
+    }
+    int n = snprintf(path, path_size, temp ? SAVEGAME_TMP_PATH_FORMAT : SAVEGAME_PATH_FORMAT, slot + 1);
+    return n > 0 && n < (int)path_size;
+}
+
+static int read_save_slot_header(int slot, SaveGameHeader *out_header)
+{
+    char path[64];
+    if (!save_slot_path(slot, 0, path, sizeof(path))) {
+        return -1;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return errno == ENOENT ? 0 : -1;
+    }
+    SaveGameHeader header;
+    int ok = read_exact(f, &header, sizeof(header)) && savegame_header_matches(&header);
+    fclose(f);
+    if (!ok) {
+        return -1;
+    }
+    if (out_header) {
+        *out_header = header;
+    }
+    return 1;
+}
+
+static void save_slot_menu_label(int slot, char *out, size_t out_size)
+{
+    SaveGameHeader header;
+    int status = read_save_slot_header(slot, &header);
+    if (status <= 0) {
+        snprintf(out, out_size, "S%d %s", slot + 1, status < 0 ? "BLAD" : "PUSTY");
+        return;
+    }
+
+    time_t saved_time = (time_t)header.saved_at;
+    struct tm *local = localtime(&saved_time);
+    char stamp[20];
+    if (local && strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M", local) > 0) {
+        snprintf(out, out_size, "S%d %s", slot + 1, stamp);
+    } else {
+        snprintf(out, out_size, "S%d BLAD DATY", slot + 1);
+    }
+}
+
+static int save_runtime_game(Runtime *rt, int slot)
+{
+    char path[64];
+    char tmp_path[64];
+    if (!save_slot_path(slot, 0, path, sizeof(path)) ||
+        !save_slot_path(slot, 1, tmp_path, sizeof(tmp_path))) {
+        fprintf(stderr, "error: invalid savegame slot %d\n", slot + 1);
+        return 0;
+    }
+
+    time_t now = time(NULL);
+    if (now == (time_t)-1) {
+        fprintf(stderr, "error: cannot read current time for savegame timestamp\n");
+        return 0;
+    }
+    SaveGameHeader header = savegame_header((uint64_t)now);
+    SaveGamePayload payload;
+    memset(&payload, 0, sizeof(payload));
+    payload.runtime_level_seed = runtime_level_seed;
+    payload.runtime_level_mode = runtime_level_mode;
+    payload.runtime_difficulty = runtime_difficulty;
+    payload.runtime_trainer = runtime_trainer ? 1 : 0;
+    payload.active_music_track = active_music_track;
+    payload.game_started = rt->game_started ? 1 : 0;
+    payload.game = rt->game;
+    payload.camera = rt->cam;
+    memcpy(payload.map, level_map, sizeof(level_map));
+    memcpy(payload.torches, torches, sizeof(torches));
+    payload.saved_forest = saved_forest;
+
+    FILE *f = fopen(tmp_path, "wb");
+    if (!f) {
+        fprintf(stderr, "error: cannot open savegame %s: %s\n", tmp_path, strerror(errno));
+        return 0;
+    }
+    int ok = write_exact(f, &header, sizeof(header)) &&
+             write_exact(f, &payload, sizeof(payload));
+    if (fclose(f) != 0) {
+        ok = 0;
+    }
+    if (!ok) {
+        fprintf(stderr, "error: cannot write savegame %s\n", tmp_path);
+        remove(tmp_path);
+        return 0;
+    }
+    if (rename(tmp_path, path) != 0) {
+        fprintf(stderr, "error: cannot replace savegame %s: %s\n", path, strerror(errno));
+        remove(tmp_path);
+        return 0;
+    }
+    close_slot_menu(rt);
+    return 1;
+}
+
+static int load_runtime_game(Runtime *rt, int slot)
+{
+    char path[64];
+    if (!save_slot_path(slot, 0, path, sizeof(path))) {
+        fprintf(stderr, "error: invalid savegame slot %d\n", slot + 1);
+        return 0;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "error: cannot open savegame %s: %s\n", path, strerror(errno));
+        return 0;
+    }
+
+    SaveGameHeader header;
+    SaveGamePayload payload;
+    int ok = read_exact(f, &header, sizeof(header)) &&
+             savegame_header_matches(&header) &&
+             read_exact(f, &payload, sizeof(payload));
+    if (fclose(f) != 0) {
+        ok = 0;
+    }
+    if (!ok) {
+        fprintf(stderr, "error: savegame %s has unsupported or corrupt format\n", path);
+        return 0;
+    }
+    if (!valid_generator_mode(payload.runtime_level_mode) ||
+        !valid_generator_mode(payload.game.generator_mode) ||
+        normalize_difficulty(payload.runtime_difficulty) != payload.runtime_difficulty ||
+        !valid_music_track(payload.active_music_track)) {
+        fprintf(stderr, "error: savegame %s has invalid state values\n", path);
+        return 0;
+    }
+
+    rt->game = payload.game;
+    rt->cam = payload.camera;
+    memcpy(level_map, payload.map, sizeof(level_map));
+    memcpy(torches, payload.torches, sizeof(torches));
+    saved_forest = payload.saved_forest;
+    runtime_level_seed = payload.runtime_level_seed;
+    runtime_level_mode = payload.runtime_level_mode;
+    runtime_difficulty = payload.runtime_difficulty;
+    runtime_trainer = payload.runtime_trainer ? 1 : 0;
+    rt->difficulty = runtime_difficulty;
+    rt->trainer = runtime_trainer;
+    rt->game_started = 1;
+    rt->paused = 0;
+    rt->menu_open = 0;
+    rt->menu_page = MENU_PAGE_MAIN;
+    rt->menu_selected = MAIN_MENU_ITEM_PLAY;
+    active_game = &rt->game;
+    moon_visibility_cache_ready = 0;
+    torch_flicker_cache_ready = 0;
+    sync_relic_progress(&rt->game);
+    if (saved_forest.valid) {
+        sync_relic_progress(&saved_forest.game);
+    }
+    set_active_music_track(payload.active_music_track);
+    return 1;
+}
+
+static int save_runtime_settings(const Runtime *rt)
+{
+    if (!rt->settings_ready) {
+        return 1;
+    }
+    return save_settings_file(rt->difficulty,
+                              rt->render_quality,
+                              rt->render_effects,
+                              rt->fullscreen,
+                              rt->sfx_volume,
+                              rt->music_volume,
+                              rt->trainer);
+}
 
 static void set_runtime_difficulty(Runtime *rt, int difficulty)
 {
@@ -7887,16 +9405,104 @@ static void set_runtime_difficulty(Runtime *rt, int difficulty)
 static void cycle_runtime_difficulty(Runtime *rt, int delta)
 {
     set_runtime_difficulty(rt, adjust_difficulty(rt->difficulty, delta));
+    save_runtime_settings(rt);
+}
+
+static void adjust_runtime_audio_volume(Runtime *rt, int target_music, int delta)
+{
+    if (target_music) {
+        rt->music_volume = clamp_volume_step(rt->music_volume + delta);
+    } else {
+        rt->sfx_volume = clamp_volume_step(rt->sfx_volume + delta);
+    }
+    set_audio_volume_steps(rt->sfx_volume, rt->music_volume);
+    save_runtime_settings(rt);
+}
+
+static void toggle_runtime_render_quality(Runtime *rt)
+{
+    rt->render_quality = rt->render_quality == RENDER_QUALITY_FAST ? RENDER_QUALITY_PBR : RENDER_QUALITY_FAST;
+    save_runtime_settings(rt);
+}
+
+static void toggle_runtime_render_effects(Runtime *rt)
+{
+    rt->render_effects = rt->render_effects == RENDER_EFFECTS_FULL ? RENDER_EFFECTS_OFF : RENDER_EFFECTS_FULL;
+    save_runtime_settings(rt);
 }
 
 static int toggle_runtime_fullscreen(Runtime *rt)
 {
-    rt->fullscreen = !rt->fullscreen;
-    if (SDL_SetWindowFullscreen(rt->window, rt->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {
+    int next_fullscreen = !rt->fullscreen;
+    if (SDL_SetWindowFullscreen(rt->window, next_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {
         fprintf(stderr, "SDL_SetWindowFullscreen failed: %s\n", SDL_GetError());
         return 0;
     }
+    rt->fullscreen = next_fullscreen;
+    save_runtime_settings(rt);
     return 1;
+}
+
+static void adjust_runtime_settings_item(Runtime *rt, int item, int delta)
+{
+    if (item == SETTINGS_MENU_ITEM_DIFFICULTY) {
+        cycle_runtime_difficulty(rt, delta);
+    } else if (item == SETTINGS_MENU_ITEM_QUALITY) {
+        toggle_runtime_render_quality(rt);
+    } else if (item == SETTINGS_MENU_ITEM_POST) {
+        toggle_runtime_render_effects(rt);
+    } else if (item == SETTINGS_MENU_ITEM_SFX_VOLUME) {
+        adjust_runtime_audio_volume(rt, 0, delta);
+    } else if (item == SETTINGS_MENU_ITEM_MUSIC_VOLUME) {
+        adjust_runtime_audio_volume(rt, 1, delta);
+    } else if (item == SETTINGS_MENU_ITEM_FULLSCREEN) {
+        if (!toggle_runtime_fullscreen(rt)) {
+            rt->running = 0;
+        }
+    }
+}
+
+static void open_main_menu(Runtime *rt)
+{
+    rt->menu_open = 1;
+    rt->paused = 1;
+    rt->menu_page = MENU_PAGE_MAIN;
+    rt->menu_selected = MAIN_MENU_ITEM_PLAY;
+}
+
+static void open_settings_menu(Runtime *rt)
+{
+    rt->menu_page = MENU_PAGE_SETTINGS;
+    rt->menu_selected = SETTINGS_MENU_ITEM_DIFFICULTY;
+}
+
+static void close_settings_menu(Runtime *rt)
+{
+    rt->menu_page = MENU_PAGE_MAIN;
+    rt->menu_selected = MAIN_MENU_ITEM_SETTINGS;
+}
+
+static void open_save_menu(Runtime *rt)
+{
+    rt->menu_open = 1;
+    rt->paused = 1;
+    rt->menu_page = MENU_PAGE_SAVE;
+    rt->menu_selected = 0;
+}
+
+static void open_load_menu(Runtime *rt)
+{
+    rt->menu_open = 1;
+    rt->paused = 1;
+    rt->menu_page = MENU_PAGE_LOAD;
+    rt->menu_selected = 0;
+}
+
+static void close_slot_menu(Runtime *rt)
+{
+    int previous_page = rt->menu_page;
+    rt->menu_page = MENU_PAGE_MAIN;
+    rt->menu_selected = previous_page == MENU_PAGE_LOAD ? MAIN_MENU_ITEM_LOAD : MAIN_MENU_ITEM_SAVE;
 }
 
 static int parse_window_size(const char *text, int *out_w, int *out_h)
@@ -7951,14 +9557,140 @@ static int parse_render_effects(const char *text, int *out_effects)
     return 0;
 }
 
-static int parse_runtime_config(int argc, char **argv, RuntimeConfig *config)
+static const char *render_quality_config_text(int quality)
+{
+    return quality == RENDER_QUALITY_FAST ? "fast" : "pbr";
+}
+
+static const char *render_effects_config_text(int effects)
+{
+    return effects == RENDER_EFFECTS_FULL ? "full" : "off";
+}
+
+static void init_runtime_config_defaults(RuntimeConfig *config)
 {
     config->window_w = SCREEN_W * WINDOW_SCALE;
     config->window_h = SCREEN_H * WINDOW_SCALE;
     config->integer_scale = 0;
     config->render_quality = DEFAULT_RENDER_QUALITY;
     config->render_effects = DEFAULT_RENDER_EFFECTS;
+    config->difficulty = DEFAULT_DIFFICULTY;
+    config->fullscreen = 0;
+    config->sfx_volume = DEFAULT_SFX_VOLUME_STEP;
+    config->music_volume = DEFAULT_MUSIC_VOLUME_STEP;
+    config->trainer = 0;
     config->scale_quality = "nearest";
+}
+
+static char *trim_ini_text(char *text)
+{
+    while (isspace((unsigned char)*text)) {
+        text++;
+    }
+    char *end = text + strlen(text);
+    while (end > text && isspace((unsigned char)end[-1])) {
+        *--end = '\0';
+    }
+    return text;
+}
+
+static int parse_ini_int(const char *text, int min_value, int max_value, int *out_value)
+{
+    char *end = NULL;
+    long value = strtol(text, &end, 10);
+    if (end == text || *end != '\0' || value < min_value || value > max_value) {
+        return 0;
+    }
+    *out_value = (int)value;
+    return 1;
+}
+
+static int load_runtime_settings(RuntimeConfig *config)
+{
+    FILE *f = fopen(SETTINGS_PATH, "r");
+    if (!f) {
+        if (errno != ENOENT) {
+            fprintf(stderr, "warning: cannot read %s: %s\n", SETTINGS_PATH, strerror(errno));
+        }
+        return 1;
+    }
+
+    char line[160];
+    int line_no = 0;
+    while (fgets(line, sizeof(line), f)) {
+        line_no++;
+        char *text = trim_ini_text(line);
+        if (*text == '\0' || *text == '#' || *text == ';') {
+            continue;
+        }
+        char *eq = strchr(text, '=');
+        if (!eq) {
+            fprintf(stderr, "warning: ignoring %s:%d without key=value\n", SETTINGS_PATH, line_no);
+            continue;
+        }
+        *eq = '\0';
+        char *key = trim_ini_text(text);
+        char *value = trim_ini_text(eq + 1);
+        int parsed = 0;
+        if (strcmp(key, "quality") == 0) {
+            parsed = parse_render_quality(value, &config->render_quality);
+        } else if (strcmp(key, "post_process") == 0) {
+            parsed = parse_render_effects(value, &config->render_effects);
+        } else if (strcmp(key, "difficulty") == 0) {
+            parsed = parse_difficulty_name(value, &config->difficulty);
+        } else if (strcmp(key, "fullscreen") == 0) {
+            parsed = parse_ini_int(value, 0, 1, &config->fullscreen);
+        } else if (strcmp(key, "sfx_volume") == 0) {
+            parsed = parse_ini_int(value, 0, AUDIO_VOLUME_STEPS, &config->sfx_volume);
+        } else if (strcmp(key, "music_volume") == 0) {
+            parsed = parse_ini_int(value, 0, AUDIO_VOLUME_STEPS, &config->music_volume);
+        } else if (strcmp(key, "trainer") == 0) {
+            parsed = parse_ini_int(value, 0, 1, &config->trainer);
+        } else {
+            fprintf(stderr, "warning: ignoring unknown setting %s:%d %s\n", SETTINGS_PATH, line_no, key);
+            parsed = 1;
+        }
+        if (!parsed) {
+            fprintf(stderr, "warning: ignoring invalid setting %s:%d %s=%s\n", SETTINGS_PATH, line_no, key, value);
+        }
+    }
+
+    if (ferror(f)) {
+        fprintf(stderr, "warning: cannot finish reading %s: %s\n", SETTINGS_PATH, strerror(errno));
+    }
+    fclose(f);
+    config->difficulty = normalize_difficulty(config->difficulty);
+    config->sfx_volume = clamp_volume_step(config->sfx_volume);
+    config->music_volume = clamp_volume_step(config->music_volume);
+    config->trainer = config->trainer ? 1 : 0;
+    return 1;
+}
+
+static int save_settings_file(int difficulty, int quality, int effects, int fullscreen, int sfx_step, int music_step, int trainer)
+{
+    FILE *f = fopen(SETTINGS_PATH, "w");
+    if (!f) {
+        fprintf(stderr, "error: cannot write %s: %s\n", SETTINGS_PATH, strerror(errno));
+        return 0;
+    }
+    fprintf(f, "difficulty=%s\n", difficulty_config_text(difficulty));
+    fprintf(f, "quality=%s\n", render_quality_config_text(quality));
+    fprintf(f, "post_process=%s\n", render_effects_config_text(effects));
+    fprintf(f, "fullscreen=%d\n", fullscreen ? 1 : 0);
+    fprintf(f, "sfx_volume=%d\n", clamp_volume_step(sfx_step));
+    fprintf(f, "music_volume=%d\n", clamp_volume_step(music_step));
+    fprintf(f, "trainer=%d\n", trainer ? 1 : 0);
+    if (fclose(f) != 0) {
+        fprintf(stderr, "error: cannot close %s: %s\n", SETTINGS_PATH, strerror(errno));
+        return 0;
+    }
+    return 1;
+}
+
+static int parse_runtime_config(int argc, char **argv, RuntimeConfig *config)
+{
+    init_runtime_config_defaults(config);
+    load_runtime_settings(config);
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--window") == 0) {
@@ -7997,6 +9729,10 @@ static int parse_runtime_config(int argc, char **argv, RuntimeConfig *config)
 
 static void shutdown_runtime(Runtime *rt)
 {
+    if (rt->settings_ready) {
+        save_runtime_settings(rt);
+        rt->settings_ready = 0;
+    }
     if (rt->screen) {
         SDL_DestroyTexture(rt->screen);
         rt->screen = NULL;
@@ -8010,6 +9746,7 @@ static void shutdown_runtime(Runtime *rt)
         rt->window = NULL;
     }
     shutdown_audio();
+    free_midi_tracks();
     SDL_Quit();
 }
 
@@ -8033,7 +9770,7 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, config->scale_quality);
 
     rt->window = SDL_CreateWindow(
-        "Software Raycaster",
+        "Dioom",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         config->window_w,
@@ -8073,14 +9810,30 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
     rt->running = 1;
     rt->paused = 1;
     rt->menu_open = 1;
-    rt->menu_selected = MENU_ITEM_PLAY;
-    rt->difficulty = normalize_difficulty(DEFAULT_DIFFICULTY);
+    rt->menu_page = MENU_PAGE_MAIN;
+    rt->menu_selected = MAIN_MENU_ITEM_PLAY;
+    rt->difficulty = normalize_difficulty(config->difficulty);
+    rt->trainer = config->trainer ? 1 : 0;
     runtime_difficulty = rt->difficulty;
+    runtime_trainer = rt->trainer;
     runtime_level_seed = LEVEL_TEST_SEED ^ (uint32_t)SDL_GetTicks() ^ (uint32_t)SDL_GetPerformanceCounter();
-    reset_run(&rt->game, &rt->cam);
     rt->render_quality = config->render_quality;
     rt->render_effects = config->render_effects;
+    render_quality = rt->render_quality;
     render_effects = rt->render_effects;
+    rt->sfx_volume = clamp_volume_step(config->sfx_volume);
+    rt->music_volume = clamp_volume_step(config->music_volume);
+    set_audio_volume_steps(rt->sfx_volume, rt->music_volume);
+    if (config->fullscreen) {
+        if (SDL_SetWindowFullscreen(rt->window, SDL_WINDOW_FULLSCREEN_DESKTOP) != 0) {
+            fprintf(stderr, "SDL_SetWindowFullscreen failed: %s\n", SDL_GetError());
+            shutdown_runtime(rt);
+            return 0;
+        }
+        rt->fullscreen = 1;
+    }
+    reset_run(&rt->game, &rt->cam);
+    rt->settings_ready = 1;
     rt->prev = SDL_GetPerformanceCounter();
     return 1;
 }
@@ -8096,55 +9849,62 @@ static void runtime_frame(void *userdata)
             SDL_Keycode key = event.key.keysym.sym;
             int help_closed = rt->menu_open ? 0 : close_help_on_key(&rt->game);
             if (rt->menu_open) {
+                int menu_count = menu_item_count_for_page(rt->menu_page);
                 if ((key == SDLK_w || key == SDLK_UP) && event.key.repeat == 0) {
-                    rt->menu_selected = (rt->menu_selected + MENU_ITEM_COUNT - 1) % MENU_ITEM_COUNT;
+                    rt->menu_selected = (rt->menu_selected + menu_count - 1) % menu_count;
                 } else if ((key == SDLK_s || key == SDLK_DOWN) && event.key.repeat == 0) {
-                    rt->menu_selected = (rt->menu_selected + 1) % MENU_ITEM_COUNT;
-                } else if ((key == SDLK_a || key == SDLK_LEFT || key == SDLK_d || key == SDLK_RIGHT) && event.key.repeat == 0) {
+                    rt->menu_selected = (rt->menu_selected + 1) % menu_count;
+                } else if (rt->menu_page == MENU_PAGE_SETTINGS &&
+                           (key == SDLK_a || key == SDLK_LEFT || key == SDLK_d || key == SDLK_RIGHT) &&
+                           event.key.repeat == 0) {
                     int delta = (key == SDLK_a || key == SDLK_LEFT) ? -1 : 1;
-                    if (rt->menu_selected == MENU_ITEM_DIFFICULTY) {
-                        cycle_runtime_difficulty(rt, delta);
-                    } else if (rt->menu_selected == MENU_ITEM_QUALITY) {
-                        rt->render_quality = rt->render_quality == RENDER_QUALITY_FAST ? RENDER_QUALITY_PBR : RENDER_QUALITY_FAST;
-                    } else if (rt->menu_selected == MENU_ITEM_POST) {
-                        rt->render_effects = rt->render_effects == RENDER_EFFECTS_FULL ? RENDER_EFFECTS_OFF : RENDER_EFFECTS_FULL;
-                    } else if (rt->menu_selected == MENU_ITEM_FULLSCREEN) {
-                        if (!toggle_runtime_fullscreen(rt)) {
-                            rt->running = 0;
-                        }
-                    }
+                    adjust_runtime_settings_item(rt, rt->menu_selected, delta);
                 } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE) && event.key.repeat == 0) {
-                    if (rt->menu_selected == MENU_ITEM_PLAY) {
-                        if (!rt->game_started) {
-                            reset_run(&rt->game, &rt->cam);
+                    if (rt->menu_page == MENU_PAGE_SETTINGS) {
+                        if (rt->menu_selected == SETTINGS_MENU_ITEM_BACK) {
+                            close_settings_menu(rt);
+                        } else {
+                            adjust_runtime_settings_item(rt, rt->menu_selected, 1);
                         }
-                        rt->menu_open = 0;
-                        rt->paused = 0;
-                        rt->game_started = 1;
-                    } else if (rt->menu_selected == MENU_ITEM_RESTART) {
-                        reset_run(&rt->game, &rt->cam);
-                        rt->menu_open = 0;
-                        rt->paused = 0;
-                        rt->game_started = 1;
-                    } else if (rt->menu_selected == MENU_ITEM_DIFFICULTY) {
-                        cycle_runtime_difficulty(rt, 1);
-                    } else if (rt->menu_selected == MENU_ITEM_QUALITY) {
-                        rt->render_quality = rt->render_quality == RENDER_QUALITY_FAST ? RENDER_QUALITY_PBR : RENDER_QUALITY_FAST;
-                    } else if (rt->menu_selected == MENU_ITEM_POST) {
-                        rt->render_effects = rt->render_effects == RENDER_EFFECTS_FULL ? RENDER_EFFECTS_OFF : RENDER_EFFECTS_FULL;
-                    } else if (rt->menu_selected == MENU_ITEM_FULLSCREEN) {
-                        if (!toggle_runtime_fullscreen(rt)) {
+                    } else if (rt->menu_page == MENU_PAGE_SAVE || rt->menu_page == MENU_PAGE_LOAD) {
+                        if (rt->menu_selected == SLOT_MENU_ITEM_BACK) {
+                            close_slot_menu(rt);
+                        } else if (rt->menu_page == MENU_PAGE_SAVE) {
+                            play_sfx(save_runtime_game(rt, rt->menu_selected) ? SFX_PICKUP : SFX_LOCKED, 0.48);
+                        } else {
+                            play_sfx(load_runtime_game(rt, rt->menu_selected) ? SFX_PORTAL : SFX_LOCKED, 0.48);
+                        }
+                    } else {
+                        if (rt->menu_selected == MAIN_MENU_ITEM_PLAY) {
+                            if (!rt->game_started) {
+                                reset_run(&rt->game, &rt->cam);
+                            }
+                            rt->menu_open = 0;
+                            rt->paused = 0;
+                            rt->game_started = 1;
+                        } else if (rt->menu_selected == MAIN_MENU_ITEM_RESTART) {
+                            reset_run(&rt->game, &rt->cam);
+                            rt->menu_open = 0;
+                            rt->paused = 0;
+                            rt->game_started = 1;
+                        } else if (rt->menu_selected == MAIN_MENU_ITEM_SAVE) {
+                            open_save_menu(rt);
+                        } else if (rt->menu_selected == MAIN_MENU_ITEM_LOAD) {
+                            open_load_menu(rt);
+                        } else if (rt->menu_selected == MAIN_MENU_ITEM_SETTINGS) {
+                            open_settings_menu(rt);
+                        } else if (rt->menu_selected == MAIN_MENU_ITEM_EXIT) {
                             rt->running = 0;
                         }
-                    } else if (rt->menu_selected == MENU_ITEM_EXIT) {
-                        rt->running = 0;
                     }
                 } else if (key == SDLK_ESCAPE && event.key.repeat == 0) {
-                    if (rt->game_started) {
+                    if (rt->menu_page == MENU_PAGE_SETTINGS) {
+                        close_settings_menu(rt);
+                    } else if (rt->menu_page == MENU_PAGE_SAVE || rt->menu_page == MENU_PAGE_LOAD) {
+                        close_slot_menu(rt);
+                    } else if (rt->game_started) {
                         rt->menu_open = 0;
                         rt->paused = 0;
-                    } else {
-                        rt->running = 0;
                     }
                 } else if (key == SDLK_F3 && event.key.repeat == 0) {
                     rt->show_fps = !rt->show_fps;
@@ -8153,20 +9913,22 @@ static void runtime_frame(void *userdata)
                 } else if (key == SDLK_F4 && event.key.repeat == 0) {
                     rt->show_timings = !rt->show_timings;
                 } else if (key == SDLK_F5 && event.key.repeat == 0) {
-                    rt->render_quality = rt->render_quality == RENDER_QUALITY_FAST ? RENDER_QUALITY_PBR : RENDER_QUALITY_FAST;
+                    toggle_runtime_render_quality(rt);
                 } else if (key == SDLK_F6 && event.key.repeat == 0) {
-                    rt->render_effects = rt->render_effects == RENDER_EFFECTS_FULL ? RENDER_EFFECTS_OFF : RENDER_EFFECTS_FULL;
+                    toggle_runtime_render_effects(rt);
                 } else if (key == SDLK_F11 && event.key.repeat == 0) {
                     if (!toggle_runtime_fullscreen(rt)) {
                         rt->running = 0;
                     }
+                } else if (key == SDLK_F8 && event.key.repeat == 0) {
+                    open_save_menu(rt);
+                } else if (key == SDLK_F9 && event.key.repeat == 0) {
+                    open_load_menu(rt);
                 }
                 continue;
             }
             if (key == SDLK_ESCAPE) {
-                rt->menu_open = 1;
-                rt->paused = 1;
-                rt->menu_selected = MENU_ITEM_PLAY;
+                open_main_menu(rt);
             } else if (key == SDLK_1) {
                 select_weapon(&rt->game, WEAPON_KNIFE);
             } else if (key == SDLK_2) {
@@ -8221,13 +9983,17 @@ static void runtime_frame(void *userdata)
             } else if (key == SDLK_F4 && event.key.repeat == 0) {
                 rt->show_timings = !rt->show_timings;
             } else if (key == SDLK_F5 && event.key.repeat == 0) {
-                rt->render_quality = rt->render_quality == RENDER_QUALITY_FAST ? RENDER_QUALITY_PBR : RENDER_QUALITY_FAST;
+                toggle_runtime_render_quality(rt);
             } else if (key == SDLK_F6 && event.key.repeat == 0) {
-                rt->render_effects = rt->render_effects == RENDER_EFFECTS_FULL ? RENDER_EFFECTS_OFF : RENDER_EFFECTS_FULL;
+                toggle_runtime_render_effects(rt);
             } else if (key == SDLK_F11 && event.key.repeat == 0) {
                 if (!toggle_runtime_fullscreen(rt)) {
                     rt->running = 0;
                 }
+            } else if (key == SDLK_F8 && event.key.repeat == 0) {
+                open_save_menu(rt);
+            } else if (key == SDLK_F9 && event.key.repeat == 0) {
+                open_load_menu(rt);
             }
         } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
             if (!rt->paused && !rt->menu_open) {
@@ -8273,15 +10039,17 @@ static void runtime_frame(void *userdata)
     if (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]) turn -= 1.0;
     if (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) turn += 1.0;
 
-    if (!rt->paused && !rt->menu_open && !rt->game.game_over && !rt->game.victory && (forward != 0.0 || strafe != 0.0)) {
+    if (!rt->paused && !rt->menu_open && !rt->game.game_over && (forward != 0.0 || strafe != 0.0)) {
         move_camera(&rt->cam, &rt->game, forward, strafe, dt);
     }
-    if (!rt->paused && !rt->menu_open && !rt->game.game_over && !rt->game.victory && turn != 0.0) {
+    if (!rt->paused && !rt->menu_open && !rt->game.game_over && turn != 0.0) {
         rotate_camera(&rt->cam, turn * 2.2 * dt);
     }
 
-    if (!rt->paused && !rt->menu_open && !rt->game.game_over && !rt->game.victory) {
-        update_items(&rt->game, &rt->cam);
+    if (!rt->paused && !rt->menu_open && !rt->game.game_over) {
+        if (!rt->game.victory) {
+            update_items(&rt->game, &rt->cam);
+        }
         update_game(&rt->game, &rt->cam, dt);
     }
     render_quality = rt->render_quality;
@@ -8291,7 +10059,15 @@ static void runtime_frame(void *userdata)
     active_profile = NULL;
     render_quality = RENDER_QUALITY_PBR;
     if (rt->menu_open) {
-        render_game_menu(rt->menu_selected, rt->game_started, rt->difficulty, rt->render_quality, rt->render_effects, rt->fullscreen);
+        render_game_menu(rt->menu_page,
+                         rt->menu_selected,
+                         rt->game_started,
+                         rt->difficulty,
+                         rt->render_quality,
+                         rt->render_effects,
+                         rt->sfx_volume,
+                         rt->music_volume,
+                         rt->fullscreen);
     } else if (rt->paused) {
         render_pause_overlay();
     }

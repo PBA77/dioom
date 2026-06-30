@@ -8,8 +8,8 @@ CPPFLAGS += -I$(SDL2_PREFIX)/include
 LDFLAGS += -L$(SDL2_PREFIX)/lib
 LDLIBS += -lSDL2 -lm
 
-TARGET := raycaster
-HIRES_TARGET := raycaster-hires
+TARGET := dioom
+HIRES_TARGET := dioom-hires
 HIRES_W ?= 640
 HIRES_H ?= 480
 HIRES_SCALE ?= 2
@@ -62,7 +62,7 @@ $(WEB_DIR):
 	mkdir -p $@
 
 clean:
-	rm -rf $(TARGET) $(TARGET).dSYM $(HIRES_TARGET) $(HIRES_TARGET).dSYM frame.ppm frame-hires.ppm frame.png
+	rm -rf $(TARGET) $(TARGET).dSYM $(HIRES_TARGET) $(HIRES_TARGET).dSYM raycaster raycaster.dSYM raycaster-hires raycaster-hires.dSYM frame.ppm frame-hires.ppm frame.png
 
 clean-wasm:
 	rm -f $(WEB_DIR)/index.html $(WEB_DIR)/index.js $(WEB_DIR)/index.wasm $(WEB_DIR)/index.data
