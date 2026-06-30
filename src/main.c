@@ -40,6 +40,9 @@
 #define SPRITE_FRAMES 4
 #define MONSTER_TYPES 6
 #define TREE_TYPES 4
+#define HOUSE_TEX_COUNT 4
+#define HOUSE_ATLAS_COLS 2
+#define HOUSE_ATLAS_ROWS ((HOUSE_TEX_COUNT + HOUSE_ATLAS_COLS - 1) / HOUSE_ATLAS_COLS)
 #define DECAL_SIZE 64
 #define DECAL_COUNT 16
 #define WALL_DECAL_SIZE 64
@@ -56,8 +59,15 @@
 #define MAX_WALL_DECALS 64
 #define MAX_PARTICLES 64
 #define MAX_TREES 96
+#define MAX_HOUSES 3
 #define TREE_COLLISION_RADIUS 0.46
 #define TREE_RENDER_NEAR_CLIP 0.30
+#define HOUSE_COLLISION_PADDING 0.18
+#define HOUSE_RENDER_NEAR_CLIP 0.08
+#define HOUSE_WALL_HEIGHT 1.08
+#define HOUSE_ROOF_RISE 0.42
+#define HOUSE_ROOF_OVERHANG 0.16
+#define HOUSE_HEIGHT (HOUSE_WALL_HEIGHT + HOUSE_ROOF_RISE)
 #define DOOR_OPEN_SPEED 1.45
 #define MAX_DOORS 4
 #define MAX_SECRETS 3
@@ -101,6 +111,7 @@
 #define GIANT_SKELETON_ATLAS_PATH "assets/giant_skeleton.ppm"
 #define BOSS_ATLAS_PATH "assets/boss.ppm"
 #define TREE_ATLAS_PATH "assets/trees.ppm"
+#define HOUSE_ATLAS_PATH "assets/houses.ppm"
 #define RELIC_ATLAS_PATH "assets/relics.ppm"
 #define ITEM_ATLAS_PATH "assets/items.ppm"
 #define WEAPON_ATLAS_PATH "assets/weapons.ppm"
@@ -115,7 +126,7 @@
 #define SAVEGAME_PATH_FORMAT "dioom_slot%d.sav"
 #define SAVEGAME_TMP_PATH_FORMAT "dioom_slot%d.sav.tmp"
 #define SAVEGAME_MAGIC 0x4D4F4944u
-#define SAVEGAME_VERSION 2u
+#define SAVEGAME_VERSION 3u
 #define MAX_SAMPLE_VOICES 16
 #define MAX_MIDI_VOICES 24
 #define MONSTER_FLYING_HEAD 4
@@ -328,6 +339,14 @@ typedef struct {
 } Tree;
 
 typedef struct {
+    int active;
+    int variant;
+    Vec2 pos;
+    double half_w;
+    double half_d;
+} House;
+
+typedef struct {
     int x;
     int y;
     int locked;
@@ -385,6 +404,7 @@ typedef struct {
     Projectile projectiles[MAX_PROJECTILES];
     Item items[MAX_ITEMS];
     Tree trees[MAX_TREES];
+    House houses[MAX_HOUSES];
     Decal decals[MAX_DECALS];
     WallDecal wall_decals[MAX_WALL_DECALS];
     int wall_decal_head[MAP_H][MAP_W][2];
@@ -638,6 +658,7 @@ static uint32_t monster_sprites[MONSTER_TYPES][SPRITE_FRAMES][MONSTER_ANIM_FRAME
 static uint32_t giant_skeleton_sprites[SPRITE_FRAMES][MONSTER_ANIM_FRAMES][GIANT_SKELETON_SPRITE_SIZE * GIANT_SKELETON_SPRITE_SIZE];
 static uint32_t boss_sprites[SPRITE_FRAMES][BOSS_ANIM_FRAMES][BOSS_SPRITE_SIZE * BOSS_SPRITE_SIZE];
 static uint32_t tree_sprites[TREE_TYPES][SPRITE_SIZE * SPRITE_SIZE];
+static uint32_t house_textures[HOUSE_TEX_COUNT][TEX_SIZE * TEX_SIZE];
 static uint32_t relic_sprites[RELIC_COUNT][PROJECTILE_SIZE * PROJECTILE_SIZE];
 static uint32_t item_sprites[ITEM_SPRITE_COUNT][PROJECTILE_SIZE * PROJECTILE_SIZE];
 static uint32_t weapon_sprites[WEAPON_SPRITE_COUNT][WEAPON_SPRITE_SIZE * WEAPON_SPRITE_SIZE];
@@ -659,6 +680,11 @@ static int fog_lut_ready = 0;
 static RenderProfile *active_profile = NULL;
 static int render_quality = DEFAULT_RENDER_QUALITY;
 static int render_effects = DEFAULT_RENDER_EFFECTS;
+
+static double house_min_x(const House *house);
+static double house_max_x(const House *house);
+static double house_min_y(const House *house);
+static double house_max_y(const House *house);
 static GameState *active_game = NULL;
 static SfxSample sfx_samples[SFX_COUNT];
 static SampleVoice sample_voices[MAX_SAMPLE_VOICES];
@@ -1728,6 +1754,61 @@ static int load_tree_atlas(const char *path)
     return 1;
 }
 
+static int load_house_atlas(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return 0;
+    }
+
+    char magic[3] = {0};
+    int width = 0;
+    int height = 0;
+    int max_value = 0;
+    int ok = fread(magic, 1, 2, f) == 2 &&
+             strcmp(magic, "P6") == 0 &&
+             ppm_next_int(f, &width) &&
+             ppm_next_int(f, &height) &&
+             ppm_next_int(f, &max_value) &&
+             width == TEX_SIZE * HOUSE_ATLAS_COLS &&
+             height == TEX_SIZE * HOUSE_ATLAS_ROWS &&
+             max_value == 255;
+
+    int sep = fgetc(f);
+    if (!isspace(sep)) {
+        ok = 0;
+    }
+
+    size_t pixel_count = (size_t)width * (size_t)height;
+    uint8_t *pixels = ok ? malloc(pixel_count * 3) : NULL;
+    if (!pixels) {
+        fclose(f);
+        return 0;
+    }
+
+    ok = fread(pixels, 3, pixel_count, f) == pixel_count;
+    fclose(f);
+    if (!ok) {
+        free(pixels);
+        return 0;
+    }
+
+    for (int tex = 0; tex < HOUSE_TEX_COUNT; ++tex) {
+        int tile_x = (tex % HOUSE_ATLAS_COLS) * TEX_SIZE;
+        int tile_y = (tex / HOUSE_ATLAS_COLS) * TEX_SIZE;
+
+        for (int y = 0; y < TEX_SIZE; ++y) {
+            for (int x = 0; x < TEX_SIZE; ++x) {
+                size_t src = ((size_t)(tile_y + y) * (size_t)width + (size_t)(tile_x + x)) * 3;
+                house_textures[tex][y * TEX_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
+            }
+        }
+    }
+
+    free(pixels);
+    return 1;
+}
+
 static int load_relic_atlas(const char *path)
 {
     FILE *f = fopen(path, "rb");
@@ -2367,6 +2448,10 @@ static int init_assets(void)
     }
     if (!load_tree_atlas(TREE_ATLAS_PATH)) {
         fprintf(stderr, "error: cannot load required tree atlas %s\n", TREE_ATLAS_PATH);
+        return 0;
+    }
+    if (!load_house_atlas(HOUSE_ATLAS_PATH)) {
+        fprintf(stderr, "error: cannot load required house atlas %s\n", HOUSE_ATLAS_PATH);
         return 0;
     }
     if (!load_relic_atlas(RELIC_ATLAS_PATH)) {
@@ -4397,6 +4482,388 @@ static uint32_t apply_wall_decals(const GameState *game, int map_x, int map_y, i
     return lit;
 }
 
+enum {
+    HOUSE_TEX_FRONT = 0,
+    HOUSE_TEX_SIDE = 1,
+    HOUSE_TEX_BACK = 2,
+    HOUSE_TEX_ROOF = 3,
+};
+
+enum {
+    HOUSE_FACE_WEST = 0,
+    HOUSE_FACE_EAST = 1,
+    HOUSE_FACE_NORTH = 2,
+    HOUSE_FACE_SOUTH = 3,
+};
+
+typedef struct {
+    const House *house;
+    double depth;
+    double hit_x;
+    double hit_y;
+    double u;
+    int face;
+} HouseHit;
+
+static int intersect_house_ray(const House *house, const Camera *cam, double ray_dir_x, double ray_dir_y, HouseHit *hit)
+{
+    if (!house->active) {
+        return 0;
+    }
+
+    double t_min = -1e30;
+    double t_max = 1e30;
+    int face = -1;
+
+    if (fabs(ray_dir_x) < 0.000001) {
+        if (cam->pos.x < house_min_x(house) || cam->pos.x > house_max_x(house)) {
+            return 0;
+        }
+    } else {
+        double tx1 = (house_min_x(house) - cam->pos.x) / ray_dir_x;
+        double tx2 = (house_max_x(house) - cam->pos.x) / ray_dir_x;
+        int near_face = ray_dir_x > 0.0 ? HOUSE_FACE_WEST : HOUSE_FACE_EAST;
+        if (tx1 > tx2) {
+            double t = tx1;
+            tx1 = tx2;
+            tx2 = t;
+        }
+        if (tx1 > t_min) {
+            t_min = tx1;
+            face = near_face;
+        }
+        if (tx2 < t_max) t_max = tx2;
+    }
+
+    if (fabs(ray_dir_y) < 0.000001) {
+        if (cam->pos.y < house_min_y(house) || cam->pos.y > house_max_y(house)) {
+            return 0;
+        }
+    } else {
+        double ty1 = (house_min_y(house) - cam->pos.y) / ray_dir_y;
+        double ty2 = (house_max_y(house) - cam->pos.y) / ray_dir_y;
+        int near_face = ray_dir_y > 0.0 ? HOUSE_FACE_NORTH : HOUSE_FACE_SOUTH;
+        if (ty1 > ty2) {
+            double t = ty1;
+            ty1 = ty2;
+            ty2 = t;
+        }
+        if (ty1 > t_min) {
+            t_min = ty1;
+            face = near_face;
+        }
+        if (ty2 < t_max) t_max = ty2;
+    }
+
+    if (face < 0 || t_min > t_max || t_min <= HOUSE_RENDER_NEAR_CLIP) {
+        return 0;
+    }
+
+    double hit_x = cam->pos.x + ray_dir_x * t_min;
+    double hit_y = cam->pos.y + ray_dir_y * t_min;
+    double u;
+    if (face == HOUSE_FACE_WEST || face == HOUSE_FACE_EAST) {
+        u = (hit_y - house_min_y(house)) / (house_max_y(house) - house_min_y(house));
+        if (face == HOUSE_FACE_EAST) {
+            u = 1.0 - u;
+        }
+    } else {
+        u = (hit_x - house_min_x(house)) / (house_max_x(house) - house_min_x(house));
+        if (face == HOUSE_FACE_NORTH) {
+            u = 1.0 - u;
+        }
+    }
+
+    hit->house = house;
+    hit->depth = t_min;
+    hit->hit_x = hit_x;
+    hit->hit_y = hit_y;
+    hit->u = clamp01(u);
+    hit->face = face;
+    return 1;
+}
+
+static uint32_t house_texel_for_face(int face, double u, double v)
+{
+    double wall_v = 0.16 + clamp01(v) * 0.84;
+    if (face == HOUSE_FACE_WEST || face == HOUSE_FACE_EAST) {
+        wall_v = 0.34 + clamp01(v) * 0.66;
+    }
+    if (face == HOUSE_FACE_WEST) {
+        int tex_x = (int)(clamp01(u) * (TEX_SIZE - 1));
+        int tex_y = (int)(wall_v * (TEX_SIZE - 1));
+        return house_textures[HOUSE_TEX_FRONT][tex_y * TEX_SIZE + tex_x];
+    }
+    int tex = face == HOUSE_FACE_EAST ? HOUSE_TEX_BACK : HOUSE_TEX_SIDE;
+    int tex_x = (int)(clamp01(u) * (TEX_SIZE - 1));
+    int tex_y = (int)(wall_v * (TEX_SIZE - 1));
+    return house_textures[tex][tex_y * TEX_SIZE + tex_x];
+}
+
+typedef struct {
+    double x;
+    double y;
+    double depth;
+} ProjectedPoint;
+
+typedef struct {
+    ProjectedPoint p;
+    double u;
+    double v;
+} TexturedPoint;
+
+static int project_world_point(const Camera *cam, double world_x, double world_y, double z, ProjectedPoint *out)
+{
+    double rel_x = world_x - cam->pos.x;
+    double rel_y = world_y - cam->pos.y;
+    double inv_det = 1.0 / (cam->plane.x * cam->dir.y - cam->dir.x * cam->plane.y);
+    double transform_x = inv_det * (cam->dir.y * rel_x - cam->dir.x * rel_y);
+    double transform_y = inv_det * (-cam->plane.y * rel_x + cam->plane.x * rel_y);
+
+    if (transform_y <= HOUSE_RENDER_NEAR_CLIP) {
+        return 0;
+    }
+
+    out->x = (SCREEN_W / 2.0) * (1.0 + transform_x / transform_y);
+    out->y = SCREEN_H * 0.5 - SCREEN_H * (z - 0.5) / transform_y;
+    out->depth = transform_y;
+    return 1;
+}
+
+static void render_roof_triangle(const GameState *game, ProjectedPoint a, ProjectedPoint b, ProjectedPoint c, uint32_t color)
+{
+    double denom = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+    if (fabs(denom) < 0.0001) {
+        return;
+    }
+
+    int min_x = (int)floor(fmin(a.x, fmin(b.x, c.x)));
+    int max_x = (int)ceil(fmax(a.x, fmax(b.x, c.x)));
+    int min_y = (int)floor(fmin(a.y, fmin(b.y, c.y)));
+    int max_y = (int)ceil(fmax(a.y, fmax(b.y, c.y)));
+    if (min_x < 0) min_x = 0;
+    if (max_x >= SCREEN_W) max_x = SCREEN_W - 1;
+    if (min_y < 0) min_y = 0;
+    if (max_y >= SCREEN_H - 14) max_y = SCREEN_H - 15;
+    if (min_x > max_x || min_y > max_y) {
+        return;
+    }
+
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int x = min_x; x <= max_x; ++x) {
+            double px = x + 0.5;
+            double py = y + 0.5;
+            double wa = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) / denom;
+            double wb = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) / denom;
+            double wc = 1.0 - wa - wb;
+            if (wa < -0.0001 || wb < -0.0001 || wc < -0.0001) {
+                continue;
+            }
+
+            double inv_depth = wa / a.depth + wb / b.depth + wc / c.depth;
+            if (inv_depth <= 0.0) {
+                continue;
+            }
+            double depth = 1.0 / inv_depth;
+            int idx = y * SCREEN_W + x;
+            if (depth >= depth_buffer[idx] - 0.02) {
+                continue;
+            }
+
+            framebuffer[idx] = apply_game_fog(game, color, depth, 0.82);
+            depth_buffer[idx] = depth;
+        }
+    }
+}
+
+static void render_gable_triangle(const GameState *game, TexturedPoint a, TexturedPoint b, TexturedPoint c, int tex, double light)
+{
+    double denom = (b.p.y - c.p.y) * (a.p.x - c.p.x) + (c.p.x - b.p.x) * (a.p.y - c.p.y);
+    if (fabs(denom) < 0.0001) {
+        return;
+    }
+
+    int min_x = (int)floor(fmin(a.p.x, fmin(b.p.x, c.p.x)));
+    int max_x = (int)ceil(fmax(a.p.x, fmax(b.p.x, c.p.x)));
+    int min_y = (int)floor(fmin(a.p.y, fmin(b.p.y, c.p.y)));
+    int max_y = (int)ceil(fmax(a.p.y, fmax(b.p.y, c.p.y)));
+    if (min_x < 0) min_x = 0;
+    if (max_x >= SCREEN_W) max_x = SCREEN_W - 1;
+    if (min_y < 0) min_y = 0;
+    if (max_y >= SCREEN_H - 14) max_y = SCREEN_H - 15;
+    if (min_x > max_x || min_y > max_y) {
+        return;
+    }
+
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int x = min_x; x <= max_x; ++x) {
+            double px = x + 0.5;
+            double py = y + 0.5;
+            double wa = ((b.p.y - c.p.y) * (px - c.p.x) + (c.p.x - b.p.x) * (py - c.p.y)) / denom;
+            double wb = ((c.p.y - a.p.y) * (px - c.p.x) + (a.p.x - c.p.x) * (py - c.p.y)) / denom;
+            double wc = 1.0 - wa - wb;
+            if (wa < -0.0001 || wb < -0.0001 || wc < -0.0001) {
+                continue;
+            }
+
+            double inv_depth = wa / a.p.depth + wb / b.p.depth + wc / c.p.depth;
+            if (inv_depth <= 0.0) {
+                continue;
+            }
+            double depth = 1.0 / inv_depth;
+            int idx = y * SCREEN_W + x;
+            if (depth >= depth_buffer[idx] - 0.02) {
+                continue;
+            }
+
+            double tex_u = (wa * a.u / a.p.depth + wb * b.u / b.p.depth + wc * c.u / c.p.depth) / inv_depth;
+            double tex_v = (wa * a.v / a.p.depth + wb * b.v / b.p.depth + wc * c.v / c.p.depth) / inv_depth;
+            int tex_x = (int)(clamp01(tex_u) * (TEX_SIZE - 1));
+            int tex_y = (int)(clamp01(tex_v) * (TEX_SIZE - 1));
+            uint32_t color = house_textures[tex][tex_y * TEX_SIZE + tex_x];
+
+            uint32_t lit = shade(color, light);
+            framebuffer[idx] = apply_game_fog(game, lit, depth, 0.86);
+            depth_buffer[idx] = depth;
+        }
+    }
+}
+
+static void render_house_roof_quad(const GameState *game, ProjectedPoint a, ProjectedPoint b, ProjectedPoint c, ProjectedPoint d, uint32_t color)
+{
+    render_roof_triangle(game, a, b, c, color);
+    render_roof_triangle(game, a, c, d, color);
+}
+
+static void render_house_roofs_and_gables(const Camera *cam, const GameState *game)
+{
+    for (int i = 0; i < MAX_HOUSES; ++i) {
+        const House *house = &game->houses[i];
+        if (!house->active) {
+            continue;
+        }
+
+        double x0 = house_min_x(house) - HOUSE_ROOF_OVERHANG;
+        double x1 = house_max_x(house) + HOUSE_ROOF_OVERHANG;
+        double y0 = house_min_y(house) - HOUSE_ROOF_OVERHANG;
+        double y1 = house_max_y(house) + HOUSE_ROOF_OVERHANG;
+        double ridge_y = house->pos.y;
+        double eave_z = HOUSE_WALL_HEIGHT;
+        double ridge_z = HOUSE_WALL_HEIGHT + HOUSE_ROOF_RISE;
+
+        ProjectedPoint north_west;
+        ProjectedPoint north_east;
+        ProjectedPoint ridge_west;
+        ProjectedPoint ridge_east;
+        ProjectedPoint south_west;
+        ProjectedPoint south_east;
+        if (!project_world_point(cam, x0, y0, eave_z, &north_west) ||
+            !project_world_point(cam, x1, y0, eave_z, &north_east) ||
+            !project_world_point(cam, x0, ridge_y, ridge_z, &ridge_west) ||
+            !project_world_point(cam, x1, ridge_y, ridge_z, &ridge_east) ||
+            !project_world_point(cam, x0, y1, eave_z, &south_west) ||
+            !project_world_point(cam, x1, y1, eave_z, &south_east)) {
+            continue;
+        }
+
+        double torch_light = torch_light_at(house->pos.x, house->pos.y, game->time);
+        double moon_light = forest_moon_visibility_at(house->pos.x, house->pos.y);
+        uint32_t west_roof = shade(rgb(38, 48, 46), 0.62 + torch_light * 0.20 + moon_light * 0.10);
+        uint32_t east_roof = shade(rgb(24, 32, 34), 0.54 + torch_light * 0.16 + moon_light * 0.08);
+        west_roof = mix_color(west_roof, rgb(96, 122, 108), moon_light * 0.08);
+        east_roof = mix_color(east_roof, rgb(80, 106, 96), moon_light * 0.06);
+
+        ProjectedPoint front_left;
+        ProjectedPoint front_right;
+        ProjectedPoint front_peak;
+        ProjectedPoint back_left;
+        ProjectedPoint back_right;
+        ProjectedPoint back_peak;
+        if (project_world_point(cam, house_min_x(house), house_min_y(house), eave_z, &front_left) &&
+            project_world_point(cam, house_min_x(house), house_max_y(house), eave_z, &front_right) &&
+            project_world_point(cam, house_min_x(house), house->pos.y, ridge_z, &front_peak)) {
+            TexturedPoint a = {front_left, 0.0, 0.34};
+            TexturedPoint b = {front_right, 1.0, 0.34};
+            TexturedPoint c = {front_peak, 0.5, 0.0};
+            render_gable_triangle(game, a, b, c, HOUSE_TEX_FRONT, 0.58 + torch_light * 0.20 + moon_light * 0.09);
+        }
+        if (project_world_point(cam, house_max_x(house), house_max_y(house), eave_z, &back_left) &&
+            project_world_point(cam, house_max_x(house), house_min_y(house), eave_z, &back_right) &&
+            project_world_point(cam, house_max_x(house), house->pos.y, ridge_z, &back_peak)) {
+            TexturedPoint a = {back_left, 0.0, 0.34};
+            TexturedPoint b = {back_right, 1.0, 0.34};
+            TexturedPoint c = {back_peak, 0.5, 0.0};
+            render_gable_triangle(game, a, b, c, HOUSE_TEX_BACK, 0.48 + torch_light * 0.16 + moon_light * 0.07);
+        }
+
+        render_house_roof_quad(game, north_west, north_east, ridge_east, ridge_west, west_roof);
+        render_house_roof_quad(game, ridge_west, ridge_east, south_east, south_west, east_roof);
+    }
+}
+
+static void render_houses(const Camera *cam, const GameState *game)
+{
+    if (game->generator_mode != GENERATOR_FOREST) {
+        return;
+    }
+
+    for (int x = 0; x < SCREEN_W; ++x) {
+        double camera_x = 2.0 * x / (double)SCREEN_W - 1.0;
+        double ray_dir_x = cam->dir.x + cam->plane.x * camera_x;
+        double ray_dir_y = cam->dir.y + cam->plane.y * camera_x;
+        HouseHit best = {0};
+        best.depth = z_buffer[x];
+
+        for (int i = 0; i < MAX_HOUSES; ++i) {
+            HouseHit hit;
+            if (intersect_house_ray(&game->houses[i], cam, ray_dir_x, ray_dir_y, &hit) && hit.depth < best.depth) {
+                best = hit;
+            }
+        }
+        if (!best.house || best.depth >= z_buffer[x]) {
+            continue;
+        }
+
+        double raw_top = SCREEN_H * 0.5 - SCREEN_H * (HOUSE_WALL_HEIGHT - 0.5) / best.depth;
+        double raw_bottom = SCREEN_H * 0.5 + SCREEN_H * 0.5 / best.depth;
+        if (raw_bottom <= 0.0 || raw_top >= SCREEN_H - 14) {
+            continue;
+        }
+
+        int draw_start = (int)floor(raw_top);
+        int draw_end = (int)ceil(raw_bottom);
+        if (draw_start < 0) draw_start = 0;
+        if (draw_end >= SCREEN_H - 14) draw_end = SCREEN_H - 15;
+        if (draw_start > draw_end) {
+            continue;
+        }
+
+        double face_light = best.face == HOUSE_FACE_WEST ? 0.50 :
+                            best.face == HOUSE_FACE_SOUTH ? 0.44 :
+                            best.face == HOUSE_FACE_EAST ? 0.44 :
+                            best.face == HOUSE_FACE_NORTH ? 0.38 : 0.34;
+        double torch_light = torch_light_at(best.hit_x, best.hit_y, game->time);
+        double moon_light = forest_moon_visibility_at(best.hit_x, best.hit_y) * 0.34;
+        double distance_fade = 1.0 / (1.0 + best.depth * 0.055);
+        double light = (face_light + torch_light * 0.52 + moon_light * 0.20) * distance_fade;
+
+        for (int y = draw_start; y <= draw_end; ++y) {
+            double v = (y + 0.5 - raw_top) / (raw_bottom - raw_top);
+            if (v < 0.0 || v > 1.0) {
+                continue;
+            }
+            uint32_t color = house_texel_for_face(best.face, best.u, v);
+            uint32_t lit = shade(color, light);
+            lit = mix_color(lit, rgb(108, 136, 122), clamp01(moon_light * 0.13));
+            lit = mix_color(lit, rgb(255, 132, 48), clamp01(torch_light * 0.10));
+            framebuffer[y * SCREEN_W + x] = apply_game_fog(game, lit, best.depth, 0.86);
+            depth_buffer[y * SCREEN_W + x] = best.depth;
+            add_light(x, y, torch_light * 0.08 + moon_light * 0.025);
+        }
+        z_buffer[x] = best.depth;
+    }
+}
+
 static double elapsed_ms(uint64_t start, uint64_t end)
 {
     return (double)(end - start) * 1000.0 / (double)SDL_GetPerformanceFrequency();
@@ -4598,6 +5065,7 @@ static void render_scene(const Camera *cam, const GameState *game)
             }
         }
     }
+    render_houses(cam, game);
     if (profile) {
         uint64_t now = SDL_GetPerformanceCounter();
         profile->wall_ms = elapsed_ms(pass_start, now);
@@ -4607,6 +5075,7 @@ static void render_scene(const Camera *cam, const GameState *game)
     render_decals(cam, game);
     render_dynamic_shadows(cam, game);
     render_world_sprites(cam, game);
+    render_house_roofs_and_gables(cam, game);
     if (profile) {
         uint64_t now = SDL_GetPerformanceCounter();
         profile->sprite_ms = elapsed_ms(pass_start, now);
@@ -4727,12 +5196,68 @@ static double raycast_wall_distance(Vec2 origin, Vec2 dir)
     return 1e30;
 }
 
+static double raycast_house_distance(Vec2 origin, Vec2 dir)
+{
+    if (!active_game || active_game->generator_mode != GENERATOR_FOREST) {
+        return 1e30;
+    }
+
+    double best = 1e30;
+    for (int i = 0; i < MAX_HOUSES; ++i) {
+        const House *house = &active_game->houses[i];
+        if (!house->active) {
+            continue;
+        }
+
+        double t_min = -1e30;
+        double t_max = 1e30;
+        if (fabs(dir.x) < 0.000001) {
+            if (origin.x < house_min_x(house) || origin.x > house_max_x(house)) {
+                continue;
+            }
+        } else {
+            double tx1 = (house_min_x(house) - origin.x) / dir.x;
+            double tx2 = (house_max_x(house) - origin.x) / dir.x;
+            if (tx1 > tx2) {
+                double t = tx1;
+                tx1 = tx2;
+                tx2 = t;
+            }
+            if (tx1 > t_min) t_min = tx1;
+            if (tx2 < t_max) t_max = tx2;
+        }
+        if (fabs(dir.y) < 0.000001) {
+            if (origin.y < house_min_y(house) || origin.y > house_max_y(house)) {
+                continue;
+            }
+        } else {
+            double ty1 = (house_min_y(house) - origin.y) / dir.y;
+            double ty2 = (house_max_y(house) - origin.y) / dir.y;
+            if (ty1 > ty2) {
+                double t = ty1;
+                ty1 = ty2;
+                ty2 = t;
+            }
+            if (ty1 > t_min) t_min = ty1;
+            if (ty2 < t_max) t_max = ty2;
+        }
+
+        if (t_min <= t_max && t_max > HOUSE_RENDER_NEAR_CLIP && t_min > HOUSE_RENDER_NEAR_CLIP && t_min < best) {
+            best = t_min;
+        }
+    }
+    return best;
+}
+
 static int has_line_of_sight(Vec2 from, Vec2 to)
 {
     Vec2 diff = {to.x - from.x, to.y - from.y};
     double dist = vec_len(diff);
     Vec2 dir = vec_norm(diff);
-    return raycast_wall_distance(from, dir) + 0.12 >= dist;
+    double wall_dist = raycast_wall_distance(from, dir);
+    double house_dist = raycast_house_distance(from, dir);
+    double block_dist = wall_dist < house_dist ? wall_dist : house_dist;
+    return block_dist + 0.12 >= dist;
 }
 
 static int monster_max_hp(int type)
@@ -5110,6 +5635,66 @@ static int generated_floor(int x, int y)
     return x > 0 && x < MAP_W - 1 && y > 0 && y < MAP_H - 1 && level_map[y][x] == 0;
 }
 
+static double house_min_x(const House *house)
+{
+    return house->pos.x - house->half_w;
+}
+
+static double house_max_x(const House *house)
+{
+    return house->pos.x + house->half_w;
+}
+
+static double house_min_y(const House *house)
+{
+    return house->pos.y - house->half_d;
+}
+
+static double house_max_y(const House *house)
+{
+    return house->pos.y + house->half_d;
+}
+
+static int house_blocks_area(const House *house, double x, double y, double radius)
+{
+    if (!house->active) {
+        return 0;
+    }
+    double padding = radius + HOUSE_COLLISION_PADDING;
+    return x + padding > house_min_x(house) &&
+           x - padding < house_max_x(house) &&
+           y + padding > house_min_y(house) &&
+           y - padding < house_max_y(house);
+}
+
+static int houses_block_area(const GameState *game, double x, double y, double radius)
+{
+    if (!game || game->generator_mode != GENERATOR_FOREST) {
+        return 0;
+    }
+    for (int i = 0; i < MAX_HOUSES; ++i) {
+        if (house_blocks_area(&game->houses[i], x, y, radius)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int house_overlaps_tile(const House *house, int x, int y, double margin)
+{
+    if (!house->active) {
+        return 0;
+    }
+    double tile_min_x = x - margin;
+    double tile_max_x = x + 1.0 + margin;
+    double tile_min_y = y - margin;
+    double tile_max_y = y + 1.0 + margin;
+    return tile_max_x > house_min_x(house) &&
+           tile_min_x < house_max_x(house) &&
+           tile_max_y > house_min_y(house) &&
+           tile_min_y < house_max_y(house);
+}
+
 static int reserved_dynamic_tile(const GameState *game, int x, int y)
 {
     for (int i = 0; i < MAX_DOORS; ++i) {
@@ -5147,6 +5732,11 @@ static int occupied_spawn_tile(const GameState *game, int x, int y)
     }
     for (int i = 0; i < MAX_TREES; ++i) {
         if (game->trees[i].active && (int)game->trees[i].pos.x == x && (int)game->trees[i].pos.y == y) {
+            return 1;
+        }
+    }
+    for (int i = 0; i < MAX_HOUSES; ++i) {
+        if (house_overlaps_tile(&game->houses[i], x, y, 0.12)) {
             return 1;
         }
     }
@@ -5403,6 +5993,95 @@ static void place_forest_dungeon_portals(GameState *game, LevelRng *rng)
         .relic_index = -1,
         .boss_gate = 1,
     };
+}
+
+static int house_site_clear(const GameState *game, const House *candidate)
+{
+    if (house_min_x(candidate) < 1.10 || house_max_x(candidate) > MAP_W - 1.10 ||
+        house_min_y(candidate) < 1.10 || house_max_y(candidate) > MAP_H - 1.10) {
+        return 0;
+    }
+
+    double dx = candidate->pos.x - 2.5;
+    double dy = candidate->pos.y - 22.5;
+    if (dx * dx + dy * dy < 34.0) {
+        return 0;
+    }
+
+    int min_x = (int)floor(house_min_x(candidate) - 0.08);
+    int max_x = (int)floor(house_max_x(candidate) + 0.08);
+    int min_y = (int)floor(house_min_y(candidate) - 0.08);
+    int max_y = (int)floor(house_max_y(candidate) + 0.08);
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int x = min_x; x <= max_x; ++x) {
+            if (!generated_floor(x, y) || reserved_dynamic_tile(game, x, y)) {
+                return 0;
+            }
+        }
+    }
+
+    for (int i = 0; i < MAX_TORCHES; ++i) {
+        if (torches[i].pos.x <= 0.0 && torches[i].pos.y <= 0.0) {
+            continue;
+        }
+        if (house_blocks_area(candidate, torches[i].pos.x, torches[i].pos.y, 0.42)) {
+            return 0;
+        }
+    }
+
+    for (int i = 0; i < MAX_HOUSES; ++i) {
+        const House *other = &game->houses[i];
+        if (!other->active) {
+            continue;
+        }
+        if (fabs(candidate->pos.x - other->pos.x) < candidate->half_w + other->half_w + 3.2 &&
+            fabs(candidate->pos.y - other->pos.y) < candidate->half_d + other->half_d + 3.2) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static void place_forest_houses(GameState *game, LevelRng *rng)
+{
+    static const Vec2 preferred[] = {
+        {8.5, 20.5},
+        {16.5, 16.5},
+        {20.5, 6.5},
+        {10.5, 8.5},
+        {19.5, 12.5},
+    };
+    int count = 0;
+    memset(game->houses, 0, sizeof(game->houses));
+
+    for (int i = 0; i < (int)(sizeof(preferred) / sizeof(preferred[0])) && count < MAX_HOUSES; ++i) {
+        House candidate = {
+            .active = 1,
+            .variant = count,
+            .pos = preferred[i],
+            .half_w = 0.78 + (count % 2) * 0.06,
+            .half_d = 0.60 + ((count + 1) % 2) * 0.05,
+        };
+        if (house_site_clear(game, &candidate)) {
+            game->houses[count++] = candidate;
+        }
+    }
+
+    for (int attempt = 0; attempt < 360 && count < MAX_HOUSES; ++attempt) {
+        int x = rng_range(rng, 3, MAP_W - 4);
+        int y = rng_range(rng, 3, MAP_H - 4);
+        House candidate = {
+            .active = 1,
+            .variant = count,
+            .pos = {x + 0.5, y + 0.5},
+            .half_w = 0.76 + (rng_next(rng) % 9u) / 100.0,
+            .half_d = 0.56 + (rng_next(rng) % 9u) / 100.0,
+        };
+        if (house_site_clear(game, &candidate)) {
+            game->houses[count++] = candidate;
+        }
+    }
 }
 
 static void place_forest_trees(GameState *game, LevelRng *rng)
@@ -5791,6 +6470,7 @@ static void generate_level(GameState *game, uint32_t seed, int mode)
     LevelRng rng = {seed ? seed : LEVEL_TEST_SEED};
     LevelRoom boss_room = {15, 1, 8, 7};
     memset(torches, 0, sizeof(torches));
+    memset(game->houses, 0, sizeof(game->houses));
     level_fill_walls(seed);
 
     if (mode == GENERATOR_FOREST) {
@@ -5814,6 +6494,7 @@ static void generate_level(GameState *game, uint32_t seed, int mode)
     if (mode == GENERATOR_FOREST) {
         place_forest_dungeon_portals(game, &rng);
         place_generated_torches(game);
+        place_forest_houses(game, &rng);
         place_forest_trees(game, &rng);
     } else {
         place_generated_secrets(game, &rng);
@@ -5860,10 +6541,16 @@ static void init_game(GameState *game)
 
 static int can_occupy(double x, double y, double radius)
 {
-    return map_at((int)(x - radius), (int)(y - radius)) == 0 &&
-           map_at((int)(x + radius), (int)(y - radius)) == 0 &&
-           map_at((int)(x - radius), (int)(y + radius)) == 0 &&
-           map_at((int)(x + radius), (int)(y + radius)) == 0;
+    if (map_at((int)(x - radius), (int)(y - radius)) != 0 ||
+        map_at((int)(x + radius), (int)(y - radius)) != 0 ||
+        map_at((int)(x - radius), (int)(y + radius)) != 0 ||
+        map_at((int)(x + radius), (int)(y + radius)) != 0) {
+        return 0;
+    }
+    if (houses_block_area(active_game, x, y, radius)) {
+        return 0;
+    }
+    return 1;
 }
 
 static int can_move(double x, double y)
@@ -6303,7 +6990,9 @@ static void update_projectiles(GameState *game, const Camera *cam, double dt)
         p->pos.x += p->vel.x * dt;
         p->pos.y += p->vel.y * dt;
 
-        if (p->life <= 0.0 || map_at((int)p->pos.x, (int)p->pos.y) != 0) {
+        if (p->life <= 0.0 ||
+            map_at((int)p->pos.x, (int)p->pos.y) != 0 ||
+            houses_block_area(game, p->pos.x, p->pos.y, 0.08)) {
             if (p->type == PROJECTILE_PLAYER_FIREBALL) {
                 explode_player_fireball(game, old_pos, p->damage, p->radius);
             }
@@ -8101,6 +8790,7 @@ static int verify_generator_modes(void)
             int boss_gates = 0;
             int relic_bits = 0;
             int trees = 0;
+            int houses = 0;
             for (int i = 0; i < MAX_PORTALS; ++i) {
                 if (!game.portals[i].active || game.portals[i].exit_to_forest || !generated_floor(game.portals[i].x, game.portals[i].y)) {
                     continue;
@@ -8126,12 +8816,30 @@ static int verify_generator_modes(void)
                     return 0;
                 }
             }
+            for (int i = 0; i < MAX_HOUSES; ++i) {
+                if (!game.houses[i].active) {
+                    continue;
+                }
+                houses++;
+                if (!generated_floor((int)game.houses[i].pos.x, (int)game.houses[i].pos.y)) {
+                    fprintf(stderr, "error: forest generator placed house %d outside floor\n", i);
+                    return 0;
+                }
+                if (can_occupy(game.houses[i].pos.x, game.houses[i].pos.y, 0.12)) {
+                    fprintf(stderr, "error: forest house %d does not block movement\n", i);
+                    return 0;
+                }
+            }
             if (portals != RELIC_COUNT || relic_bits != RELIC_MASK_ALL || boss_gates != 1) {
                 fprintf(stderr, "error: forest generator did not create relic entrances and boss gate\n");
                 return 0;
             }
             if (trees < 24) {
                 fprintf(stderr, "error: forest generator did not create enough tree billboards\n");
+                return 0;
+            }
+            if (houses < 2) {
+                fprintf(stderr, "error: forest generator did not create enough blocking houses\n");
                 return 0;
             }
         }
