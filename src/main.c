@@ -4756,19 +4756,84 @@ static double prop_max_y(const Prop *prop)
     return prop->pos.y + prop->half_d;
 }
 
+static int prop_is_cylinder(const Prop *prop)
+{
+    return prop && prop->type == PROP_BARREL;
+}
+
+static double prop_footprint_radius(const Prop *prop)
+{
+    return fmin(prop->half_w, prop->half_d);
+}
+
 typedef struct {
     const Prop *prop;
     double depth;
     double hit_x;
     double hit_y;
     double u;
+    double normal_x;
+    double normal_y;
     int face;
 } PropHit;
+
+static int intersect_prop_cylinder_ray(const Prop *prop, const Camera *cam, double ray_dir_x, double ray_dir_y, PropHit *hit)
+{
+    double radius = prop_footprint_radius(prop);
+    if (radius <= 0.02) {
+        return 0;
+    }
+
+    double ox = cam->pos.x - prop->pos.x;
+    double oy = cam->pos.y - prop->pos.y;
+    double a = ray_dir_x * ray_dir_x + ray_dir_y * ray_dir_y;
+    double b = 2.0 * (ox * ray_dir_x + oy * ray_dir_y);
+    double c = ox * ox + oy * oy - radius * radius;
+    double disc = b * b - 4.0 * a * c;
+    if (a <= 0.000001 || disc < 0.0) {
+        return 0;
+    }
+
+    double sqrt_disc = sqrt(disc);
+    double inv = 0.5 / a;
+    double depth = (-b - sqrt_disc) * inv;
+    if (depth <= HOUSE_RENDER_NEAR_CLIP) {
+        depth = (-b + sqrt_disc) * inv;
+    }
+    if (depth <= HOUSE_RENDER_NEAR_CLIP) {
+        return 0;
+    }
+
+    double hit_x = cam->pos.x + ray_dir_x * depth;
+    double hit_y = cam->pos.y + ray_dir_y * depth;
+    double normal_x = (hit_x - prop->pos.x) / radius;
+    double normal_y = (hit_y - prop->pos.y) / radius;
+    double normal_len = sqrt(normal_x * normal_x + normal_y * normal_y);
+    if (normal_len > 0.000001) {
+        normal_x /= normal_len;
+        normal_y /= normal_len;
+    }
+
+    double angle = atan2(normal_y, normal_x);
+    double u = (angle + M_PI) / (M_PI * 2.0);
+    hit->prop = prop;
+    hit->depth = depth;
+    hit->hit_x = hit_x;
+    hit->hit_y = hit_y;
+    hit->u = clamp01(u);
+    hit->normal_x = normal_x;
+    hit->normal_y = normal_y;
+    hit->face = -1;
+    return 1;
+}
 
 static int intersect_prop_ray(const Prop *prop, const Camera *cam, double ray_dir_x, double ray_dir_y, PropHit *hit)
 {
     if (!prop->active || prop->height <= 0.02) {
         return 0;
+    }
+    if (prop_is_cylinder(prop)) {
+        return intersect_prop_cylinder_ray(prop, cam, ray_dir_x, ray_dir_y, hit);
     }
 
     double t_min = -1e30;
@@ -4839,6 +4904,8 @@ static int intersect_prop_ray(const Prop *prop, const Camera *cam, double ray_di
     hit->hit_x = hit_x;
     hit->hit_y = hit_y;
     hit->u = clamp01(u);
+    hit->normal_x = face == HOUSE_FACE_WEST ? -1.0 : (face == HOUSE_FACE_EAST ? 1.0 : 0.0);
+    hit->normal_y = face == HOUSE_FACE_NORTH ? -1.0 : (face == HOUSE_FACE_SOUTH ? 1.0 : 0.0);
     hit->face = face;
     return 1;
 }
@@ -4852,6 +4919,15 @@ static double prop_face_light(int face)
     case HOUSE_FACE_NORTH: return 0.40;
     default: return 0.45;
     }
+}
+
+static double prop_hit_face_light(const PropHit *hit)
+{
+    if (hit->prop && prop_is_cylinder(hit->prop)) {
+        double light = 0.48 - hit->normal_x * 0.07 + hit->normal_y * 0.04;
+        return fmax(0.38, fmin(0.60, light));
+    }
+    return prop_face_light(hit->face);
 }
 
 static void render_prop_triangle(const GameState *game, TexturedPoint a, TexturedPoint b, TexturedPoint c, const Prop *prop, double light)
@@ -4930,6 +5006,33 @@ static void render_prop_top(const Camera *cam, const GameState *game, const Prop
     render_prop_triangle(game, a, c, d, prop, light * 0.96);
 }
 
+static void render_prop_cylinder_top(const Camera *cam, const GameState *game, const Prop *prop)
+{
+    ProjectedPoint center;
+    double z = prop->height;
+    double radius = prop_footprint_radius(prop);
+    if (radius <= 0.02 || !project_world_point(cam, prop->pos.x, prop->pos.y, z, &center)) {
+        return;
+    }
+
+    const int segments = 18;
+    for (int i = 0; i < segments; ++i) {
+        double a0 = i * (M_PI * 2.0 / segments);
+        double a1 = (i + 1) * (M_PI * 2.0 / segments);
+        ProjectedPoint p0;
+        ProjectedPoint p1;
+        if (!project_world_point(cam, prop->pos.x + cos(a0) * radius, prop->pos.y + sin(a0) * radius, z, &p0) ||
+            !project_world_point(cam, prop->pos.x + cos(a1) * radius, prop->pos.y + sin(a1) * radius, z, &p1)) {
+            continue;
+        }
+        double light = 0.72 / (1.0 + fmin(center.depth, fmin(p0.depth, p1.depth)) * 0.045);
+        TexturedPoint a = {center, 0.5, 0.5};
+        TexturedPoint b = {p0, 0.5 + cos(a0) * 0.5, 0.5 + sin(a0) * 0.5};
+        TexturedPoint c = {p1, 0.5 + cos(a1) * 0.5, 0.5 + sin(a1) * 0.5};
+        render_prop_triangle(game, a, b, c, prop, light);
+    }
+}
+
 static void render_props_3d(const Camera *cam, const GameState *game)
 {
     if (game->generator_mode != GENERATOR_HOUSE) {
@@ -4938,7 +5041,11 @@ static void render_props_3d(const Camera *cam, const GameState *game)
 
     for (int i = 0; i < MAX_PROPS; ++i) {
         if (game->props[i].active) {
-            render_prop_top(cam, game, &game->props[i]);
+            if (prop_is_cylinder(&game->props[i])) {
+                render_prop_cylinder_top(cam, game, &game->props[i]);
+            } else {
+                render_prop_top(cam, game, &game->props[i]);
+            }
         }
     }
 
@@ -4974,7 +5081,7 @@ static void render_props_3d(const Camera *cam, const GameState *game)
             continue;
         }
 
-        double face_light = prop_face_light(best.face);
+        double face_light = prop_hit_face_light(&best);
         double torch_light = clamp01(torch_light_at(best.hit_x, best.hit_y, game->time) * 0.52 + player_torch_light_at(cam, game, best.hit_x, best.hit_y) * 0.58);
         double light = (face_light + torch_light * 0.75) / (1.0 + best.depth * 0.050);
 
@@ -6054,7 +6161,14 @@ static int props_block_area(const GameState *game, double x, double y, double ra
         if (!prop->active || prop->half_w <= 0.02 || prop->half_d <= 0.02) {
             continue;
         }
-        if (x + radius > prop->pos.x - prop->half_w &&
+        if (prop_is_cylinder(prop)) {
+            double dx = x - prop->pos.x;
+            double dy = y - prop->pos.y;
+            double blocked_radius = prop_footprint_radius(prop) + radius;
+            if (dx * dx + dy * dy < blocked_radius * blocked_radius) {
+                return 1;
+            }
+        } else if (x + radius > prop->pos.x - prop->half_w &&
             x - radius < prop->pos.x + prop->half_w &&
             y + radius > prop->pos.y - prop->half_d &&
             y - radius < prop->pos.y + prop->half_d) {
@@ -7878,9 +7992,17 @@ static int active_prop_index(const GameState *game, const Camera *cam)
         if (!prop->active || prop->loot_slot < 0 || prop->looted) {
             continue;
         }
-        double dx = fmax(fabs(focus.x - prop->pos.x) - prop->half_w, 0.0);
-        double dy = fmax(fabs(focus.y - prop->pos.y) - prop->half_d, 0.0);
-        double dist2 = dx * dx + dy * dy;
+        double dist2;
+        if (prop_is_cylinder(prop)) {
+            double dx = focus.x - prop->pos.x;
+            double dy = focus.y - prop->pos.y;
+            double dist = fmax(sqrt(dx * dx + dy * dy) - prop_footprint_radius(prop), 0.0);
+            dist2 = dist * dist;
+        } else {
+            double dx = fmax(fabs(focus.x - prop->pos.x) - prop->half_w, 0.0);
+            double dy = fmax(fabs(focus.y - prop->pos.y) - prop->half_d, 0.0);
+            dist2 = dx * dx + dy * dy;
+        }
         if (dist2 > 0.72 * 0.72) {
             continue;
         }
@@ -9635,8 +9757,10 @@ static int setup_prop_interaction_camera(const GameState *game, Camera *cam, con
 {
     static const double dirs[4][2] = {{-1.0, 0.0}, {1.0, 0.0}, {0.0, -1.0}, {0.0, 1.0}};
     for (int i = 0; i < 4; ++i) {
-        double px = prop->pos.x + dirs[i][0] * (prop->half_w + 0.62);
-        double py = prop->pos.y + dirs[i][1] * (prop->half_d + 0.62);
+        double half_w = prop_is_cylinder(prop) ? prop_footprint_radius(prop) : prop->half_w;
+        double half_d = prop_is_cylinder(prop) ? prop_footprint_radius(prop) : prop->half_d;
+        double px = prop->pos.x + dirs[i][0] * (half_w + 0.62);
+        double py = prop->pos.y + dirs[i][1] * (half_d + 0.62);
         if (!generated_floor((int)px, (int)py) || !can_move(px, py)) {
             continue;
         }

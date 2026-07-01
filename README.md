@@ -10,7 +10,7 @@ Wielki szkielet i boss są ładowane z osobnych atlasów 4x4: `assets/giant_skel
 
 Drzewa lasu są ładowane z `assets/trees.ppm`: atlas 4x1, cztery warianty billboardów 64x64 px. Magenta `#ff00ff` jest przezroczysta. Brak atlasu kończy program błędem.
 
-Kapliczki cmentarne w lesie są ładowane z `assets/houses.ppm`: atlas 2x2 po 64x64 px dla frontu, boków, tyłu i dachu. Meble we wnętrzach kapliczek są prostymi teksturowanymi bryłami, a ich powierzchnie są ładowane z `assets/furniture.ppm`: atlas 8x1, osiem kafli po 64x64 px. Brak któregoś atlasu kończy program błędem.
+Kapliczki cmentarne w lesie są ładowane z `assets/houses.ppm`: atlas 2x2 po 64x64 px dla frontu, boków, tyłu i dachu. Meble we wnętrzach kapliczek są prostymi teksturowanymi bryłami, a beczki teksturowanymi walcami. Ich powierzchnie są ładowane z `assets/furniture.ppm`: atlas 8x1, osiem kafli po 64x64 px. Brak któregoś atlasu kończy program błędem.
 
 Relikwie kultu są ładowane z `assets/relics.ppm`: atlas 4x1, cztery sprity pickupów 32x32 px. Magenta `#ff00ff` jest przezroczysta. Brak atlasu kończy program błędem.
 
