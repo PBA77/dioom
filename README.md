@@ -10,13 +10,15 @@ Wielki szkielet i boss są ładowane z osobnych atlasów 4x4: `assets/giant_skel
 
 Drzewa lasu są ładowane z `assets/trees.ppm`: atlas 4x1, cztery warianty billboardów 64x64 px. Magenta `#ff00ff` jest przezroczysta. Brak atlasu kończy program błędem.
 
+Kapliczki cmentarne w lesie są ładowane z `assets/houses.ppm`: atlas 2x2 po 64x64 px dla frontu, boków, tyłu i dachu. Meble we wnętrzach kapliczek są prostymi teksturowanymi bryłami, a ich powierzchnie są ładowane z `assets/furniture.ppm`: atlas 8x1, osiem kafli po 64x64 px. Brak któregoś atlasu kończy program błędem.
+
 Relikwie kultu są ładowane z `assets/relics.ppm`: atlas 4x1, cztery sprity pickupów 32x32 px. Magenta `#ff00ff` jest przezroczysta. Brak atlasu kończy program błędem.
 
 Dziesięć potworów patroluje poziom. Przeciwnicy wykrywają gracza po line-of-sight i FOV, zapamiętują ostatnią pozycję, ścigają, trzymają dystans i reagują na pobliskiego potwora, który widzi gracza. Szkielet strzela ognistymi pociskami, a pozostałe typy, w tym zjawa, atakują głównie ciosami z bliska.
 
 Gracz startuje z nożem do krótkiego dystansu. Pistolet hitscan i fireball z osobną amunicją są odblokowywane pickupami. Fireball leci jako projectile, wybucha na ścianie albo przeciwniku i zadaje obrażenia obszarowe. Trafione potwory mają krótki pain flash, a śmierć robi proceduralny pomarańczowy pop. W tle gra eksperymentalny programowy syntezator FM; las używa cichego ponurego dronu, a każda krypta relikwii wybiera inny utwór MIDI z `assets/music/`.
 
-Gra startuje w mrocznym lesie i z nożem w ręku; pistolet i fireball trzeba znaleźć jako pickupy. Level jest generowany runtime: pokoje, korytarze, drzwi, sekrety, pochodnie albo ogniska, itemy i potwory powstają z seeda przy starcie runu. Są cztery tryby generatora: klasyczny układ pokoi i korytarzy, ciasny jednokaflowy labirynt z wejściem i dalekim wyjściem, boss level z labiryntem i komnatą bossa oraz mroczny las jako duży ogrodzony teren z drzewami, ogniskami, potworami, itemami i wejściami do dungeonów. Las ma cztery wejścia do dungeonów z relikwiami kultu oraz osobną bramę bossa. Wejście zapisuje aktualny stan lasu, a wyjście w dungeonie odtwarza ten sam las i kamerę przy wejściu. Restart `R` tworzy następny seed w aktualnym trybie. `make dump` używa stałego seeda testowego, żeby render i walidacje były powtarzalne.
+Gra startuje w mrocznym lesie i z nożem w ręku; pistolet i fireball trzeba znaleźć jako pickupy. Level jest generowany runtime: pokoje, korytarze, drzwi, sekrety, pochodnie albo ogniska, itemy i potwory powstają z seeda przy starcie runu. Są cztery tryby generatora: klasyczny układ pokoi i korytarzy, ciasny jednokaflowy labirynt z wejściem i dalekim wyjściem, boss level z labiryntem i komnatą bossa oraz mroczny las jako duży ogrodzony teren z drzewami, ogniskami, kapliczkami cmentarnymi, potworami, itemami i wejściami do dungeonów. Las ma cztery wejścia do dungeonów z relikwiami kultu oraz osobną bramę bossa. Kapliczki blokują ruch, a `F` przy frontowych drzwiach przenosi do osobnego wnętrza z meblami, skrytkami i jednorazowym lootem. Wejście zapisuje aktualny stan lasu, a wyjście w dungeonie albo kapliczce odtwarza ten sam las i kamerę przy wejściu. Restart `R` tworzy następny seed w aktualnym trybie. `make dump` używa stałego seeda testowego, żeby render i walidacje były powtarzalne.
 
 Na mapie są itemy: apteczki, amunicja, rapid fire, damage boost, klucz, fireball ammo/unlock, złoto, kapliczki i cztery relikwie kultu. Pickupy są rozłożone także w bocznych odnogach, żeby eksploracja dawała zasoby do walki. Potwory wyrzucają małe kupki złota, kapliczki dają jednorazowy efekt w stylu Diablo, a stosy kości budują klimat i nie są podnoszone. Są proste drzwi, zamknięte drzwi na klucz i sekretne ściany otwierane interakcją. W prawym górnym rogu jest minimapa z fog-of-war, odkrywająca teren wokół gracza, a `Tab` pokazuje większą automapę.
 
@@ -49,7 +51,7 @@ SDL2_PREFIX=/opt/homebrew/opt/sdl2 make
 - `1/2/3`: nóż / pistolet po podniesieniu / fireball po podniesieniu
 - `4/5/6/7`: generator pokoi / ciasny labirynt / boss level / mroczny las
 - `Spacja` albo lewy przycisk myszy: strzał z wybranej broni
-- `F`: interakcja z drzwiami, sekretami, wejściami i wyjściami dungeonów
+- `F`: interakcja z drzwiami, sekretami, wejściami i wyjściami dungeonów/kapliczek oraz lootowalnymi meblami
 - `H`: pokazuje/ukrywa podpowiedź celu
 - `Tab`: pełna automapa
 - `P`: pauza
@@ -69,4 +71,10 @@ Bez otwierania okna można zapisać pojedynczą klatkę:
 ```sh
 make dump
 open frame.ppm
+```
+
+Do kontroli wnętrza kapliczki można wyrenderować osobny kadr:
+
+```sh
+./dioom --dump-house /tmp/house.ppm
 ```

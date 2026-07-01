@@ -43,6 +43,8 @@
 #define HOUSE_TEX_COUNT 4
 #define HOUSE_ATLAS_COLS 2
 #define HOUSE_ATLAS_ROWS ((HOUSE_TEX_COUNT + HOUSE_ATLAS_COLS - 1) / HOUSE_ATLAS_COLS)
+#define FURNITURE_SIZE 64
+#define FURNITURE_SPRITE_COUNT 8
 #define DECAL_SIZE 64
 #define DECAL_COUNT 16
 #define WALL_DECAL_SIZE 64
@@ -60,6 +62,7 @@
 #define MAX_PARTICLES 64
 #define MAX_TREES 96
 #define MAX_HOUSES 3
+#define MAX_PROPS 12
 #define TREE_COLLISION_RADIUS 0.46
 #define TREE_RENDER_NEAR_CLIP 0.30
 #define HOUSE_COLLISION_PADDING 0.18
@@ -112,6 +115,7 @@
 #define BOSS_ATLAS_PATH "assets/boss.ppm"
 #define TREE_ATLAS_PATH "assets/trees.ppm"
 #define HOUSE_ATLAS_PATH "assets/houses.ppm"
+#define FURNITURE_ATLAS_PATH "assets/furniture.ppm"
 #define RELIC_ATLAS_PATH "assets/relics.ppm"
 #define ITEM_ATLAS_PATH "assets/items.ppm"
 #define WEAPON_ATLAS_PATH "assets/weapons.ppm"
@@ -126,7 +130,7 @@
 #define SAVEGAME_PATH_FORMAT "dioom_slot%d.sav"
 #define SAVEGAME_TMP_PATH_FORMAT "dioom_slot%d.sav.tmp"
 #define SAVEGAME_MAGIC 0x4D4F4944u
-#define SAVEGAME_VERSION 3u
+#define SAVEGAME_VERSION 4u
 #define MAX_SAMPLE_VOICES 16
 #define MAX_MIDI_VOICES 24
 #define MONSTER_FLYING_HEAD 4
@@ -214,7 +218,19 @@ enum {
     GENERATOR_TIGHT = 1,
     GENERATOR_BOSS = 2,
     GENERATOR_FOREST = 3,
-    GENERATOR_COUNT = 4,
+    GENERATOR_HOUSE = 4,
+    GENERATOR_COUNT = 5,
+};
+
+enum {
+    PROP_BED = 0,
+    PROP_TABLE,
+    PROP_CHAIR,
+    PROP_CHEST,
+    PROP_CABINET,
+    PROP_CRATE,
+    PROP_BARREL,
+    PROP_STASH,
 };
 
 enum {
@@ -344,7 +360,22 @@ typedef struct {
     Vec2 pos;
     double half_w;
     double half_d;
+    uint32_t loot_mask;
+    int visited;
 } House;
+
+typedef struct {
+    int active;
+    int type;
+    int loot_type;
+    int loot_amount;
+    int loot_slot;
+    int looted;
+    Vec2 pos;
+    double half_w;
+    double half_d;
+    double height;
+} Prop;
 
 typedef struct {
     int x;
@@ -405,6 +436,7 @@ typedef struct {
     Item items[MAX_ITEMS];
     Tree trees[MAX_TREES];
     House houses[MAX_HOUSES];
+    Prop props[MAX_PROPS];
     Decal decals[MAX_DECALS];
     WallDecal wall_decals[MAX_WALL_DECALS];
     int wall_decal_head[MAP_H][MAP_W][2];
@@ -436,6 +468,9 @@ typedef struct {
     int difficulty;
     int trainer;
     int in_dungeon;
+    int current_house_index;
+    int current_house_variant;
+    uint32_t current_house_loot_mask;
     int relic_mask;
     int relic_count;
     int dungeon_relic_index;
@@ -659,6 +694,7 @@ static uint32_t giant_skeleton_sprites[SPRITE_FRAMES][MONSTER_ANIM_FRAMES][GIANT
 static uint32_t boss_sprites[SPRITE_FRAMES][BOSS_ANIM_FRAMES][BOSS_SPRITE_SIZE * BOSS_SPRITE_SIZE];
 static uint32_t tree_sprites[TREE_TYPES][SPRITE_SIZE * SPRITE_SIZE];
 static uint32_t house_textures[HOUSE_TEX_COUNT][TEX_SIZE * TEX_SIZE];
+static uint32_t furniture_sprites[FURNITURE_SPRITE_COUNT][FURNITURE_SIZE * FURNITURE_SIZE];
 static uint32_t relic_sprites[RELIC_COUNT][PROJECTILE_SIZE * PROJECTILE_SIZE];
 static uint32_t item_sprites[ITEM_SPRITE_COUNT][PROJECTILE_SIZE * PROJECTILE_SIZE];
 static uint32_t weapon_sprites[WEAPON_SPRITE_COUNT][WEAPON_SPRITE_SIZE * WEAPON_SPRITE_SIZE];
@@ -685,6 +721,8 @@ static double house_min_x(const House *house);
 static double house_max_x(const House *house);
 static double house_min_y(const House *house);
 static double house_max_y(const House *house);
+static Vec2 vec_norm(Vec2 v);
+static double vec_dot(Vec2 a, Vec2 b);
 static GameState *active_game = NULL;
 static SfxSample sfx_samples[SFX_COUNT];
 static SampleVoice sample_voices[MAX_SAMPLE_VOICES];
@@ -1809,6 +1847,59 @@ static int load_house_atlas(const char *path)
     return 1;
 }
 
+static int load_furniture_atlas(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return 0;
+    }
+
+    char magic[3] = {0};
+    int width = 0;
+    int height = 0;
+    int max_value = 0;
+    int ok = fread(magic, 1, 2, f) == 2 &&
+             strcmp(magic, "P6") == 0 &&
+             ppm_next_int(f, &width) &&
+             ppm_next_int(f, &height) &&
+             ppm_next_int(f, &max_value) &&
+             width == FURNITURE_SIZE * FURNITURE_SPRITE_COUNT &&
+             height == FURNITURE_SIZE &&
+             max_value == 255;
+
+    int sep = fgetc(f);
+    if (!isspace(sep)) {
+        ok = 0;
+    }
+
+    size_t pixel_count = (size_t)width * (size_t)height;
+    uint8_t *pixels = ok ? malloc(pixel_count * 3) : NULL;
+    if (!pixels) {
+        fclose(f);
+        return 0;
+    }
+
+    ok = fread(pixels, 3, pixel_count, f) == pixel_count;
+    fclose(f);
+    if (!ok) {
+        free(pixels);
+        return 0;
+    }
+
+    for (int sprite = 0; sprite < FURNITURE_SPRITE_COUNT; ++sprite) {
+        int sprite_x = sprite * FURNITURE_SIZE;
+        for (int y = 0; y < FURNITURE_SIZE; ++y) {
+            for (int x = 0; x < FURNITURE_SIZE; ++x) {
+                size_t src = ((size_t)y * (size_t)width + (size_t)(sprite_x + x)) * 3;
+                furniture_sprites[sprite][y * FURNITURE_SIZE + x] = rgb(pixels[src], pixels[src + 1], pixels[src + 2]);
+            }
+        }
+    }
+
+    free(pixels);
+    return 1;
+}
+
 static int load_relic_atlas(const char *path)
 {
     FILE *f = fopen(path, "rb");
@@ -2452,6 +2543,10 @@ static int init_assets(void)
     }
     if (!load_house_atlas(HOUSE_ATLAS_PATH)) {
         fprintf(stderr, "error: cannot load required house atlas %s\n", HOUSE_ATLAS_PATH);
+        return 0;
+    }
+    if (!load_furniture_atlas(FURNITURE_ATLAS_PATH)) {
+        fprintf(stderr, "error: cannot load required furniture atlas %s\n", FURNITURE_ATLAS_PATH);
         return 0;
     }
     if (!load_relic_atlas(RELIC_ATLAS_PATH)) {
@@ -3247,6 +3342,17 @@ static void render_item(const Camera *cam, const Item *item)
             }
         }
     }
+}
+
+static uint32_t prop_texel(const Prop *prop, double u, double v)
+{
+    int sprite = prop->type;
+    if (sprite < 0 || sprite >= FURNITURE_SPRITE_COUNT) {
+        sprite = PROP_CRATE;
+    }
+    int tex_x = (int)(clamp01(u) * (FURNITURE_SIZE - 1));
+    int tex_y = (int)(clamp01(v) * (FURNITURE_SIZE - 1));
+    return furniture_sprites[sprite][tex_y * FURNITURE_SIZE + tex_x];
 }
 
 static uint32_t portal_texel(const Portal *portal, int tex_x, int tex_y)
@@ -4630,6 +4736,263 @@ static int project_world_point(const Camera *cam, double world_x, double world_y
     return 1;
 }
 
+static double prop_min_x(const Prop *prop)
+{
+    return prop->pos.x - prop->half_w;
+}
+
+static double prop_max_x(const Prop *prop)
+{
+    return prop->pos.x + prop->half_w;
+}
+
+static double prop_min_y(const Prop *prop)
+{
+    return prop->pos.y - prop->half_d;
+}
+
+static double prop_max_y(const Prop *prop)
+{
+    return prop->pos.y + prop->half_d;
+}
+
+typedef struct {
+    const Prop *prop;
+    double depth;
+    double hit_x;
+    double hit_y;
+    double u;
+    int face;
+} PropHit;
+
+static int intersect_prop_ray(const Prop *prop, const Camera *cam, double ray_dir_x, double ray_dir_y, PropHit *hit)
+{
+    if (!prop->active || prop->height <= 0.02) {
+        return 0;
+    }
+
+    double t_min = -1e30;
+    double t_max = 1e30;
+    int face = -1;
+
+    if (fabs(ray_dir_x) < 0.000001) {
+        if (cam->pos.x < prop_min_x(prop) || cam->pos.x > prop_max_x(prop)) {
+            return 0;
+        }
+    } else {
+        double tx1 = (prop_min_x(prop) - cam->pos.x) / ray_dir_x;
+        double tx2 = (prop_max_x(prop) - cam->pos.x) / ray_dir_x;
+        int near_face = ray_dir_x > 0.0 ? HOUSE_FACE_WEST : HOUSE_FACE_EAST;
+        if (tx1 > tx2) {
+            double t = tx1;
+            tx1 = tx2;
+            tx2 = t;
+        }
+        if (tx1 > t_min) {
+            t_min = tx1;
+            face = near_face;
+        }
+        if (tx2 < t_max) t_max = tx2;
+    }
+
+    if (fabs(ray_dir_y) < 0.000001) {
+        if (cam->pos.y < prop_min_y(prop) || cam->pos.y > prop_max_y(prop)) {
+            return 0;
+        }
+    } else {
+        double ty1 = (prop_min_y(prop) - cam->pos.y) / ray_dir_y;
+        double ty2 = (prop_max_y(prop) - cam->pos.y) / ray_dir_y;
+        int near_face = ray_dir_y > 0.0 ? HOUSE_FACE_NORTH : HOUSE_FACE_SOUTH;
+        if (ty1 > ty2) {
+            double t = ty1;
+            ty1 = ty2;
+            ty2 = t;
+        }
+        if (ty1 > t_min) {
+            t_min = ty1;
+            face = near_face;
+        }
+        if (ty2 < t_max) t_max = ty2;
+    }
+
+    if (face < 0 || t_min > t_max || t_min <= HOUSE_RENDER_NEAR_CLIP) {
+        return 0;
+    }
+
+    double hit_x = cam->pos.x + ray_dir_x * t_min;
+    double hit_y = cam->pos.y + ray_dir_y * t_min;
+    double u;
+    if (face == HOUSE_FACE_WEST || face == HOUSE_FACE_EAST) {
+        u = (hit_y - prop_min_y(prop)) / (prop_max_y(prop) - prop_min_y(prop));
+        if (face == HOUSE_FACE_EAST) {
+            u = 1.0 - u;
+        }
+    } else {
+        u = (hit_x - prop_min_x(prop)) / (prop_max_x(prop) - prop_min_x(prop));
+        if (face == HOUSE_FACE_NORTH) {
+            u = 1.0 - u;
+        }
+    }
+
+    hit->prop = prop;
+    hit->depth = t_min;
+    hit->hit_x = hit_x;
+    hit->hit_y = hit_y;
+    hit->u = clamp01(u);
+    hit->face = face;
+    return 1;
+}
+
+static double prop_face_light(int face)
+{
+    switch (face) {
+    case HOUSE_FACE_WEST: return 0.58;
+    case HOUSE_FACE_SOUTH: return 0.50;
+    case HOUSE_FACE_EAST: return 0.46;
+    case HOUSE_FACE_NORTH: return 0.40;
+    default: return 0.45;
+    }
+}
+
+static void render_prop_triangle(const GameState *game, TexturedPoint a, TexturedPoint b, TexturedPoint c, const Prop *prop, double light)
+{
+    double denom = (b.p.y - c.p.y) * (a.p.x - c.p.x) + (c.p.x - b.p.x) * (a.p.y - c.p.y);
+    if (fabs(denom) < 0.0001) {
+        return;
+    }
+
+    int min_x = (int)floor(fmin(a.p.x, fmin(b.p.x, c.p.x)));
+    int max_x = (int)ceil(fmax(a.p.x, fmax(b.p.x, c.p.x)));
+    int min_y = (int)floor(fmin(a.p.y, fmin(b.p.y, c.p.y)));
+    int max_y = (int)ceil(fmax(a.p.y, fmax(b.p.y, c.p.y)));
+    if (min_x < 0) min_x = 0;
+    if (max_x >= SCREEN_W) max_x = SCREEN_W - 1;
+    if (min_y < 0) min_y = 0;
+    if (max_y >= SCREEN_H - 14) max_y = SCREEN_H - 15;
+    if (min_x > max_x || min_y > max_y) {
+        return;
+    }
+
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int x = min_x; x <= max_x; ++x) {
+            double px = x + 0.5;
+            double py = y + 0.5;
+            double wa = ((b.p.y - c.p.y) * (px - c.p.x) + (c.p.x - b.p.x) * (py - c.p.y)) / denom;
+            double wb = ((c.p.y - a.p.y) * (px - c.p.x) + (a.p.x - c.p.x) * (py - c.p.y)) / denom;
+            double wc = 1.0 - wa - wb;
+            if (wa < -0.0001 || wb < -0.0001 || wc < -0.0001) {
+                continue;
+            }
+
+            double inv_depth = wa / a.p.depth + wb / b.p.depth + wc / c.p.depth;
+            if (inv_depth <= 0.0) {
+                continue;
+            }
+            double depth = 1.0 / inv_depth;
+            int idx = y * SCREEN_W + x;
+            if (depth >= depth_buffer[idx] - 0.02) {
+                continue;
+            }
+
+            double tex_u = (wa * a.u / a.p.depth + wb * b.u / b.p.depth + wc * c.u / c.p.depth) / inv_depth;
+            double tex_v = (wa * a.v / a.p.depth + wb * b.v / b.p.depth + wc * c.v / c.p.depth) / inv_depth;
+            uint32_t color = prop_texel(prop, tex_u, tex_v);
+            uint32_t lit = shade(color, light);
+            if (prop->looted && prop->loot_slot >= 0) {
+                lit = mix_color(lit, rgb(32, 26, 22), 0.20);
+            }
+            framebuffer[idx] = apply_game_fog(game, lit, depth, 0.74);
+            depth_buffer[idx] = depth;
+        }
+    }
+}
+
+static void render_prop_top(const Camera *cam, const GameState *game, const Prop *prop)
+{
+    ProjectedPoint p00;
+    ProjectedPoint p10;
+    ProjectedPoint p11;
+    ProjectedPoint p01;
+    double z = prop->height;
+    if (!project_world_point(cam, prop_min_x(prop), prop_min_y(prop), z, &p00) ||
+        !project_world_point(cam, prop_max_x(prop), prop_min_y(prop), z, &p10) ||
+        !project_world_point(cam, prop_max_x(prop), prop_max_y(prop), z, &p11) ||
+        !project_world_point(cam, prop_min_x(prop), prop_max_y(prop), z, &p01)) {
+        return;
+    }
+
+    double light = 0.72 / (1.0 + fmin(fmin(p00.depth, p10.depth), fmin(p11.depth, p01.depth)) * 0.045);
+    TexturedPoint a = {p00, 0.0, 0.0};
+    TexturedPoint b = {p10, 1.0, 0.0};
+    TexturedPoint c = {p11, 1.0, 1.0};
+    TexturedPoint d = {p01, 0.0, 1.0};
+    render_prop_triangle(game, a, b, c, prop, light);
+    render_prop_triangle(game, a, c, d, prop, light * 0.96);
+}
+
+static void render_props_3d(const Camera *cam, const GameState *game)
+{
+    if (game->generator_mode != GENERATOR_HOUSE) {
+        return;
+    }
+
+    for (int i = 0; i < MAX_PROPS; ++i) {
+        if (game->props[i].active) {
+            render_prop_top(cam, game, &game->props[i]);
+        }
+    }
+
+    for (int x = 0; x < SCREEN_W; ++x) {
+        double camera_x = 2.0 * x / (double)SCREEN_W - 1.0;
+        double ray_dir_x = cam->dir.x + cam->plane.x * camera_x;
+        double ray_dir_y = cam->dir.y + cam->plane.y * camera_x;
+
+        PropHit best;
+        memset(&best, 0, sizeof(best));
+        best.depth = 1e30;
+        for (int i = 0; i < MAX_PROPS; ++i) {
+            PropHit hit;
+            if (intersect_prop_ray(&game->props[i], cam, ray_dir_x, ray_dir_y, &hit) && hit.depth < best.depth) {
+                best = hit;
+            }
+        }
+        if (!best.prop || best.depth >= z_buffer[x]) {
+            continue;
+        }
+
+        double raw_top = SCREEN_H * 0.5 - SCREEN_H * (best.prop->height - 0.5) / best.depth;
+        double raw_bottom = SCREEN_H * 0.5 + SCREEN_H * 0.5 / best.depth;
+        if (raw_bottom <= raw_top + 1.0) {
+            continue;
+        }
+
+        int draw_start = (int)floor(raw_top);
+        int draw_end = (int)ceil(raw_bottom);
+        if (draw_start < 0) draw_start = 0;
+        if (draw_end >= SCREEN_H - 14) draw_end = SCREEN_H - 15;
+        if (draw_start > draw_end) {
+            continue;
+        }
+
+        double face_light = prop_face_light(best.face);
+        double torch_light = clamp01(torch_light_at(best.hit_x, best.hit_y, game->time) * 0.52 + player_torch_light_at(cam, game, best.hit_x, best.hit_y) * 0.58);
+        double light = (face_light + torch_light * 0.75) / (1.0 + best.depth * 0.050);
+
+        for (int y = draw_start; y <= draw_end; ++y) {
+            double v = (y + 0.5 - raw_top) / (raw_bottom - raw_top);
+            uint32_t color = prop_texel(best.prop, best.u, v);
+            uint32_t lit = shade(color, light);
+            if (best.prop->looted && best.prop->loot_slot >= 0) {
+                lit = mix_color(lit, rgb(32, 26, 22), 0.20);
+            }
+            framebuffer[y * SCREEN_W + x] = apply_game_fog(game, lit, best.depth, 0.74);
+            depth_buffer[y * SCREEN_W + x] = best.depth;
+            add_light(x, y, torch_light * 0.08);
+        }
+        z_buffer[x] = best.depth;
+    }
+}
+
 static void render_roof_triangle(const GameState *game, ProjectedPoint a, ProjectedPoint b, ProjectedPoint c, uint32_t color)
 {
     double denom = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
@@ -5066,6 +5429,7 @@ static void render_scene(const Camera *cam, const GameState *game)
         }
     }
     render_houses(cam, game);
+    render_props_3d(cam, game);
     if (profile) {
         uint64_t now = SDL_GetPerformanceCounter();
         profile->wall_ms = elapsed_ms(pass_start, now);
@@ -5680,6 +6044,26 @@ static int houses_block_area(const GameState *game, double x, double y, double r
     return 0;
 }
 
+static int props_block_area(const GameState *game, double x, double y, double radius)
+{
+    if (!game) {
+        return 0;
+    }
+    for (int i = 0; i < MAX_PROPS; ++i) {
+        const Prop *prop = &game->props[i];
+        if (!prop->active || prop->half_w <= 0.02 || prop->half_d <= 0.02) {
+            continue;
+        }
+        if (x + radius > prop->pos.x - prop->half_w &&
+            x - radius < prop->pos.x + prop->half_w &&
+            y + radius > prop->pos.y - prop->half_d &&
+            y - radius < prop->pos.y + prop->half_d) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int house_overlaps_tile(const House *house, int x, int y, double margin)
 {
     if (!house->active) {
@@ -5737,6 +6121,11 @@ static int occupied_spawn_tile(const GameState *game, int x, int y)
     }
     for (int i = 0; i < MAX_HOUSES; ++i) {
         if (house_overlaps_tile(&game->houses[i], x, y, 0.12)) {
+            return 1;
+        }
+    }
+    for (int i = 0; i < MAX_PROPS; ++i) {
+        if (game->props[i].active && (int)game->props[i].pos.x == x && (int)game->props[i].pos.y == y) {
             return 1;
         }
     }
@@ -6121,6 +6510,121 @@ static void place_forest_trees(GameState *game, LevelRng *rng)
     }
 }
 
+static void place_house_prop(GameState *game,
+                             int *count,
+                             int type,
+                             Vec2 pos,
+                             double half_w,
+                             double half_d,
+                             double height,
+                             int loot_type,
+                             int loot_amount,
+                             int loot_slot,
+                             uint32_t loot_mask)
+{
+    if (*count < 0 || *count >= MAX_PROPS) {
+        return;
+    }
+    game->props[*count] = (Prop){
+        .active = 1,
+        .type = type,
+        .loot_type = loot_type,
+        .loot_amount = loot_amount,
+        .loot_slot = loot_slot,
+        .looted = loot_slot >= 0 && (loot_mask & (1u << loot_slot)),
+        .pos = pos,
+        .half_w = half_w,
+        .half_d = half_d,
+        .height = height,
+    };
+    *count += 1;
+}
+
+static void place_house_exit_portal(GameState *game)
+{
+    game->portals[0] = (Portal){
+        .active = 1,
+        .x = 7,
+        .y = 12,
+        .target_mode = GENERATOR_FOREST,
+        .exit_to_forest = 1,
+        .relic_index = -1,
+        .boss_gate = 0,
+    };
+}
+
+static void place_house_torches(int variant)
+{
+    memset(torches, 0, sizeof(torches));
+    torches[0].pos = (Vec2){10.0, 8.12};
+    torches[1].pos = (Vec2){14.0, 8.12};
+    torches[2].pos = (Vec2){8.12, variant == 1 ? 11.5 : 14.5};
+    torches[3].pos = (Vec2){15.88, variant == 2 ? 11.5 : 14.5};
+}
+
+static void generate_house_level(GameState *game, uint32_t seed)
+{
+    (void)seed;
+    int variant = game->current_house_variant % 3;
+    if (variant < 0) {
+        variant = 0;
+    }
+    uint32_t loot_mask = game->current_house_loot_mask;
+
+    memset(game->props, 0, sizeof(game->props));
+    memset(game->items, 0, sizeof(game->items));
+    memset(game->doors, 0, sizeof(game->doors));
+    memset(game->secrets, 0, sizeof(game->secrets));
+    memset(game->portals, 0, sizeof(game->portals));
+    memset(game->trees, 0, sizeof(game->trees));
+    memset(game->houses, 0, sizeof(game->houses));
+    memset(game->projectiles, 0, sizeof(game->projectiles));
+    memset(game->particles, 0, sizeof(game->particles));
+    memset(game->decals, 0, sizeof(game->decals));
+    memset(game->wall_decals, 0, sizeof(game->wall_decals));
+    clear_wall_decal_index(game);
+    game->monster_count = 0;
+
+    for (int y = 0; y < MAP_H; ++y) {
+        for (int x = 0; x < MAP_W; ++x) {
+            level_map[y][x] = 4 + ((x + y + variant) & 1);
+        }
+    }
+    carve_room((LevelRoom){8, 8, 8, 9});
+    place_house_exit_portal(game);
+    place_house_torches(variant);
+
+    int count = 0;
+    if (variant == 1) {
+        place_house_prop(game, &count, PROP_BED, (Vec2){14.7, 9.0}, 0.58, 0.34, 0.34, -1, 0, -1, loot_mask);
+        place_house_prop(game, &count, PROP_TABLE, (Vec2){10.2, 12.0}, 0.42, 0.30, 0.42, -1, 0, -1, loot_mask);
+        place_house_prop(game, &count, PROP_CHAIR, (Vec2){11.1, 12.4}, 0.24, 0.22, 0.58, -1, 0, -1, loot_mask);
+        place_house_prop(game, &count, PROP_CHEST, (Vec2){8.7, 8.7}, 0.36, 0.26, 0.42, ITEM_GOLD, 24, 0, loot_mask);
+        place_house_prop(game, &count, PROP_CABINET, (Vec2){14.9, 13.8}, 0.34, 0.26, 0.92, ITEM_AMMO, 0, 1, loot_mask);
+        place_house_prop(game, &count, PROP_CRATE, (Vec2){12.5, 15.4}, 0.28, 0.28, 0.48, ITEM_HEALTH, 0, 2, loot_mask);
+        place_house_prop(game, &count, PROP_BARREL, (Vec2){9.0, 15.6}, 0.26, 0.26, 0.55, ITEM_GOLD, 12, 3, loot_mask);
+        place_house_prop(game, &count, PROP_STASH, (Vec2){13.1, 10.1}, 0.36, 0.20, 0.10, ITEM_RAPID, 0, 4, loot_mask);
+    } else if (variant == 2) {
+        place_house_prop(game, &count, PROP_BED, (Vec2){9.0, 9.0}, 0.58, 0.34, 0.34, -1, 0, -1, loot_mask);
+        place_house_prop(game, &count, PROP_TABLE, (Vec2){12.6, 12.7}, 0.42, 0.30, 0.42, -1, 0, -1, loot_mask);
+        place_house_prop(game, &count, PROP_CHAIR, (Vec2){11.7, 13.1}, 0.24, 0.22, 0.58, -1, 0, -1, loot_mask);
+        place_house_prop(game, &count, PROP_CABINET, (Vec2){8.7, 14.4}, 0.34, 0.26, 0.92, ITEM_DAMAGE, 0, 0, loot_mask);
+        place_house_prop(game, &count, PROP_CHEST, (Vec2){14.8, 8.7}, 0.36, 0.26, 0.42, ITEM_GOLD, 30, 1, loot_mask);
+        place_house_prop(game, &count, PROP_CRATE, (Vec2){14.8, 15.4}, 0.28, 0.28, 0.48, ITEM_AMMO, 0, 2, loot_mask);
+        place_house_prop(game, &count, PROP_BARREL, (Vec2){10.1, 15.5}, 0.26, 0.26, 0.55, ITEM_HEALTH, 0, 3, loot_mask);
+        place_house_prop(game, &count, PROP_STASH, (Vec2){12.0, 9.6}, 0.36, 0.20, 0.10, ITEM_FIREBALL, 0, 4, loot_mask);
+    } else {
+        place_house_prop(game, &count, PROP_BED, (Vec2){9.0, 9.0}, 0.58, 0.34, 0.34, -1, 0, -1, loot_mask);
+        place_house_prop(game, &count, PROP_TABLE, (Vec2){12.4, 12.2}, 0.42, 0.30, 0.42, -1, 0, -1, loot_mask);
+        place_house_prop(game, &count, PROP_CHAIR, (Vec2){13.4, 12.6}, 0.24, 0.22, 0.58, -1, 0, -1, loot_mask);
+        place_house_prop(game, &count, PROP_CHEST, (Vec2){14.8, 8.7}, 0.36, 0.26, 0.42, ITEM_GOLD, 18, 0, loot_mask);
+        place_house_prop(game, &count, PROP_CABINET, (Vec2){8.7, 14.2}, 0.34, 0.26, 0.92, ITEM_AMMO, 0, 1, loot_mask);
+        place_house_prop(game, &count, PROP_CRATE, (Vec2){10.4, 15.4}, 0.28, 0.28, 0.48, ITEM_HEALTH, 0, 2, loot_mask);
+        place_house_prop(game, &count, PROP_BARREL, (Vec2){14.8, 15.5}, 0.26, 0.26, 0.55, ITEM_GOLD, 10, 3, loot_mask);
+        place_house_prop(game, &count, PROP_STASH, (Vec2){11.3, 10.0}, 0.36, 0.20, 0.10, ITEM_DAMAGE, 0, 4, loot_mask);
+    }
+}
+
 static void place_dungeon_exit_portal(GameState *game)
 {
     game->portals[0] = (Portal){
@@ -6471,9 +6975,13 @@ static void generate_level(GameState *game, uint32_t seed, int mode)
     LevelRoom boss_room = {15, 1, 8, 7};
     memset(torches, 0, sizeof(torches));
     memset(game->houses, 0, sizeof(game->houses));
+    memset(game->props, 0, sizeof(game->props));
     level_fill_walls(seed);
 
-    if (mode == GENERATOR_FOREST) {
+    if (mode == GENERATOR_HOUSE) {
+        generate_house_level(game, seed);
+        return;
+    } else if (mode == GENERATOR_FOREST) {
         carve_forest_level(&rng, seed);
     } else if (mode == GENERATOR_TIGHT) {
         carve_tight_level(game, &rng);
@@ -6508,12 +7016,23 @@ static void generate_level(GameState *game, uint32_t seed, int mode)
 
 static void init_game_seed(GameState *game, uint32_t seed, int mode)
 {
+    int house_index = -1;
+    int house_variant = 0;
+    uint32_t house_loot_mask = 0;
+    if (mode == GENERATOR_HOUSE) {
+        house_index = game->current_house_index;
+        house_variant = game->current_house_variant;
+        house_loot_mask = game->current_house_loot_mask;
+    }
     memset(game, 0, sizeof(*game));
     active_game = game;
     clear_wall_decal_index(game);
     moon_visibility_cache_ready = 0;
     torch_flicker_cache_ready = 0;
     game->generator_mode = mode;
+    game->current_house_index = mode == GENERATOR_HOUSE ? house_index : -1;
+    game->current_house_variant = mode == GENERATOR_HOUSE ? house_variant : 0;
+    game->current_house_loot_mask = mode == GENERATOR_HOUSE ? house_loot_mask : 0;
     game->difficulty = normalize_difficulty(runtime_difficulty);
     game->trainer = runtime_trainer ? 1 : 0;
     game->player_health = PLAYER_MAX_HEALTH;
@@ -6523,7 +7042,7 @@ static void init_game_seed(GameState *game, uint32_t seed, int mode)
     game->pistol_unlocked = 0;
     game->fireball_unlocked = 0;
     game->dungeon_relic_index = -1;
-    game->help_timer = 7.0;
+    game->help_timer = mode == GENERATOR_HOUSE ? 0.0 : 7.0;
     sync_relic_progress(game);
     generate_level(game, seed, mode);
     if (game->trainer) {
@@ -6548,6 +7067,9 @@ static int can_occupy(double x, double y, double radius)
         return 0;
     }
     if (houses_block_area(active_game, x, y, radius)) {
+        return 0;
+    }
+    if (props_block_area(active_game, x, y, radius)) {
         return 0;
     }
     return 1;
@@ -6992,7 +7514,8 @@ static void update_projectiles(GameState *game, const Camera *cam, double dt)
 
         if (p->life <= 0.0 ||
             map_at((int)p->pos.x, (int)p->pos.y) != 0 ||
-            houses_block_area(game, p->pos.x, p->pos.y, 0.08)) {
+            houses_block_area(game, p->pos.x, p->pos.y, 0.08) ||
+            props_block_area(game, p->pos.x, p->pos.y, 0.08)) {
             if (p->type == PROJECTILE_PLAYER_FIREBALL) {
                 explode_player_fireball(game, old_pos, p->damage, p->radius);
             }
@@ -7299,6 +7822,80 @@ static const Door *active_door_prompt(const GameState *game, const Camera *cam)
     return NULL;
 }
 
+static const House *active_house_prompt(const GameState *game, const Camera *cam, int *out_index)
+{
+    if (!game || game->generator_mode != GENERATOR_FOREST) {
+        return NULL;
+    }
+    Vec2 focus = {
+        cam->pos.x + cam->dir.x * 0.82,
+        cam->pos.y + cam->dir.y * 0.82,
+    };
+    const House *best = NULL;
+    int best_index = -1;
+    double best_dist = 1e30;
+    for (int i = 0; i < MAX_HOUSES; ++i) {
+        const House *house = &game->houses[i];
+        if (!house->active) {
+            continue;
+        }
+        double door_x = house_min_x(house) - 0.12;
+        double door_y = house->pos.y;
+        double dx = focus.x - door_x;
+        double dy = focus.y - door_y;
+        double dist2 = dx * dx + dy * dy;
+        if (dist2 > 1.05 * 1.05) {
+            continue;
+        }
+        if (cam->pos.x > house_min_x(house) - 0.05 || cam->dir.x < 0.18) {
+            continue;
+        }
+        if (dist2 < best_dist) {
+            best_dist = dist2;
+            best = house;
+            best_index = i;
+        }
+    }
+    if (out_index) {
+        *out_index = best_index;
+    }
+    return best;
+}
+
+static int active_prop_index(const GameState *game, const Camera *cam)
+{
+    if (!game || game->generator_mode != GENERATOR_HOUSE) {
+        return -1;
+    }
+    Vec2 focus = {
+        cam->pos.x + cam->dir.x * 0.88,
+        cam->pos.y + cam->dir.y * 0.88,
+    };
+    int best = -1;
+    double best_dist = 1e30;
+    for (int i = 0; i < MAX_PROPS; ++i) {
+        const Prop *prop = &game->props[i];
+        if (!prop->active || prop->loot_slot < 0 || prop->looted) {
+            continue;
+        }
+        double dx = fmax(fabs(focus.x - prop->pos.x) - prop->half_w, 0.0);
+        double dy = fmax(fabs(focus.y - prop->pos.y) - prop->half_d, 0.0);
+        double dist2 = dx * dx + dy * dy;
+        if (dist2 > 0.72 * 0.72) {
+            continue;
+        }
+        Vec2 to_prop = {prop->pos.x - cam->pos.x, prop->pos.y - cam->pos.y};
+        if (vec_dot(vec_norm(to_prop), cam->dir) < 0.08) {
+            continue;
+        }
+        if (dist2 < best_dist) {
+            best_dist = dist2;
+            best = i;
+        }
+    }
+    return best;
+}
+
 static void render_interaction_label(const char *label)
 {
     int w = prompt_text_width(label);
@@ -7319,6 +7916,19 @@ static void render_interaction_prompt(const Camera *cam, const GameState *game)
         } else {
             render_interaction_label(portal->exit_to_forest ? "F WYJSCIE" : "F WEJSCIE");
         }
+        return;
+    }
+
+    int house_index = -1;
+    if (active_house_prompt(game, cam, &house_index)) {
+        (void)house_index;
+        render_interaction_label("F WEJDZ");
+        return;
+    }
+
+    int prop_index = active_prop_index(game, cam);
+    if (prop_index >= 0) {
+        render_interaction_label("F PRZESZUKAJ");
         return;
     }
 
@@ -7736,6 +8346,48 @@ static void enter_dungeon_from_forest(GameState *game, Camera *cam, const Portal
     play_sfx(SFX_PORTAL, 0.58);
 }
 
+static void enter_house_from_forest(GameState *game, Camera *cam, int house_index)
+{
+    if (house_index < 0 || house_index >= MAX_HOUSES || !game->houses[house_index].active) {
+        return;
+    }
+
+    GameState player_progress = *game;
+    int relic_mask = game->relic_mask;
+    int relic_count = game->relic_count;
+    int boss_unlocked = game->boss_unlocked;
+    int variant = game->houses[house_index].variant;
+    uint32_t loot_mask = game->houses[house_index].loot_mask;
+
+    saved_forest.valid = 1;
+    saved_forest.game = *game;
+    saved_forest.camera = *cam;
+    memcpy(saved_forest.map, level_map, sizeof(level_map));
+    memcpy(saved_forest.torches, torches, sizeof(torches));
+    saved_forest.game.houses[house_index].visited = 1;
+
+    game->current_house_index = house_index;
+    game->current_house_variant = variant;
+    game->current_house_loot_mask = loot_mask;
+    init_game_seed(game, runtime_level_seed++, GENERATOR_HOUSE);
+    copy_player_progress(game, &player_progress);
+    game->in_dungeon = 1;
+    game->relic_mask = relic_mask;
+    game->relic_count = relic_count;
+    game->boss_unlocked = boss_unlocked;
+    game->dungeon_relic_index = -1;
+    game->help_timer = 0.0;
+    sync_relic_progress(game);
+    set_active_music_track(MUSIC_TRACK_DIES_IRAE);
+    *cam = (Camera){
+        .pos = {9.20, 12.50},
+        .dir = {1.0, 0.0},
+        .plane = {0.0, 0.66},
+    };
+    reveal_fog(game, cam);
+    play_sfx(SFX_DOOR, 0.48);
+}
+
 static void return_to_saved_forest(GameState *game, Camera *cam)
 {
     if (!saved_forest.valid) {
@@ -7753,6 +8405,37 @@ static void return_to_saved_forest(GameState *game, Camera *cam)
     saved_forest.valid = 0;
     set_active_music_track(MUSIC_TRACK_FOREST);
     play_sfx(SFX_PORTAL, 0.52);
+}
+
+static void mark_current_house_looted(GameState *game, int loot_slot)
+{
+    if (!saved_forest.valid || loot_slot < 0 || loot_slot >= 31) {
+        return;
+    }
+    int house_index = game->current_house_index;
+    if (house_index < 0 || house_index >= MAX_HOUSES) {
+        return;
+    }
+    uint32_t bit = 1u << loot_slot;
+    game->current_house_loot_mask |= bit;
+    saved_forest.game.houses[house_index].loot_mask |= bit;
+}
+
+static void loot_prop(GameState *game, Prop *prop)
+{
+    if (!prop->active || prop->loot_slot < 0 || prop->looted) {
+        return;
+    }
+
+    prop->looted = 1;
+    mark_current_house_looted(game, prop->loot_slot);
+    Item loot = {
+        .active = 1,
+        .type = prop->loot_type,
+        .relic_index = prop->loot_amount,
+        .pos = prop->pos,
+    };
+    pickup_item(game, &loot);
 }
 
 static void interact_world(GameState *game, Camera *cam)
@@ -7778,6 +8461,18 @@ static void interact_world(GameState *game, Camera *cam)
             }
             enter_dungeon_from_forest(game, cam, portal);
         }
+        return;
+    }
+
+    int house_index = -1;
+    if (active_house_prompt(game, cam, &house_index)) {
+        enter_house_from_forest(game, cam, house_index);
+        return;
+    }
+
+    int prop_index = active_prop_index(game, cam);
+    if (prop_index >= 0) {
+        loot_prop(game, &game->props[prop_index]);
         return;
     }
 
@@ -8759,7 +9454,11 @@ static int verify_generator_modes(void)
         GameState game;
         init_game_seed(&game, LEVEL_TEST_SEED + (uint32_t)mode * 97u, mode);
 
-        if (game.generator_mode != mode || !can_move(2.5, 22.5) || !can_occupy(4.5, 22.5, 0.12)) {
+        double entrance_x = mode == GENERATOR_HOUSE ? 9.20 : 2.5;
+        double entrance_y = mode == GENERATOR_HOUSE ? 12.50 : 22.5;
+        double check_x = mode == GENERATOR_HOUSE ? 9.5 : 4.5;
+        double check_y = mode == GENERATOR_HOUSE ? 12.5 : 22.5;
+        if (game.generator_mode != mode || !can_move(entrance_x, entrance_y) || !can_occupy(check_x, check_y, 0.12)) {
             fprintf(stderr, "error: generator mode %d did not create a valid entrance\n", mode);
             return 0;
         }
@@ -8773,6 +9472,27 @@ static int verify_generator_modes(void)
         for (int i = 0; i < game.monster_count; ++i) {
             if (game.monsters[i].active && !can_occupy(game.monsters[i].pos.x, game.monsters[i].pos.y, 0.28)) {
                 fprintf(stderr, "error: generator mode %d placed monster %d inside a wall\n", mode, i);
+                return 0;
+            }
+        }
+        if (mode == GENERATOR_HOUSE) {
+            int props = 0;
+            int lootable = 0;
+            for (int i = 0; i < MAX_PROPS; ++i) {
+                if (!game.props[i].active) {
+                    continue;
+                }
+                props++;
+                if (!generated_floor((int)game.props[i].pos.x, (int)game.props[i].pos.y)) {
+                    fprintf(stderr, "error: house generator placed prop %d outside floor\n", i);
+                    return 0;
+                }
+                if (game.props[i].loot_slot >= 0) {
+                    lootable++;
+                }
+            }
+            if (game.monster_count != 0 || props < 7 || lootable < 4 || !game.portals[0].exit_to_forest) {
+                fprintf(stderr, "error: house generator did not create a quiet lootable interior\n");
                 return 0;
             }
         }
@@ -8908,6 +9628,125 @@ static int verify_forest_dungeon_transition(void)
         return 0;
     }
 
+    return 1;
+}
+
+static int setup_prop_interaction_camera(const GameState *game, Camera *cam, const Prop *prop)
+{
+    static const double dirs[4][2] = {{-1.0, 0.0}, {1.0, 0.0}, {0.0, -1.0}, {0.0, 1.0}};
+    for (int i = 0; i < 4; ++i) {
+        double px = prop->pos.x + dirs[i][0] * (prop->half_w + 0.62);
+        double py = prop->pos.y + dirs[i][1] * (prop->half_d + 0.62);
+        if (!generated_floor((int)px, (int)py) || !can_move(px, py)) {
+            continue;
+        }
+        cam->pos = (Vec2){px, py};
+        cam->dir = vec_norm((Vec2){prop->pos.x - px, prop->pos.y - py});
+        cam->plane = (Vec2){-cam->dir.y * 0.66, cam->dir.x * 0.66};
+        (void)game;
+        return 1;
+    }
+    return 0;
+}
+
+static int verify_forest_house_transition(void)
+{
+    GameState game;
+    Camera cam;
+    saved_forest.valid = 0;
+    init_game_seed(&game, LEVEL_TEST_SEED + 606u, GENERATOR_FOREST);
+
+    int house_index = -1;
+    for (int i = 0; i < MAX_HOUSES; ++i) {
+        if (game.houses[i].active) {
+            house_index = i;
+            break;
+        }
+    }
+    if (house_index < 0) {
+        fprintf(stderr, "error: forest has no house to enter\n");
+        return 0;
+    }
+
+    const House *house = &game.houses[house_index];
+    cam = (Camera){
+        .pos = {house_min_x(house) - 0.70, house->pos.y},
+        .dir = {1.0, 0.0},
+        .plane = {0.0, 0.66},
+    };
+    if (!active_house_prompt(&game, &cam, NULL)) {
+        fprintf(stderr, "error: forest house entrance is not interactable\n");
+        return 0;
+    }
+
+    Vec2 return_pos = cam.pos;
+    game.gold = 0;
+    interact_world(&game, &cam);
+    if (!saved_forest.valid || game.generator_mode != GENERATOR_HOUSE || !game.in_dungeon || game.current_house_index != house_index || !game.portals[0].exit_to_forest) {
+        fprintf(stderr, "error: house entrance did not create an interior level\n");
+        return 0;
+    }
+
+    int prop_index = -1;
+    for (int i = 0; i < MAX_PROPS; ++i) {
+        if (game.props[i].active && game.props[i].loot_slot >= 0 && !game.props[i].looted) {
+            prop_index = i;
+            break;
+        }
+    }
+    if (prop_index < 0 || !setup_prop_interaction_camera(&game, &cam, &game.props[prop_index])) {
+        fprintf(stderr, "error: house interior has no interactable loot prop\n");
+        return 0;
+    }
+    int loot_slot = game.props[prop_index].loot_slot;
+    int gold_before = game.gold;
+    int ammo_before = game.ammo;
+    int health_before = game.player_health;
+    int fireball_before = game.fireball_unlocked;
+    interact_world(&game, &cam);
+    if (!game.props[prop_index].looted ||
+        !(saved_forest.game.houses[house_index].loot_mask & (1u << loot_slot)) ||
+        (game.gold == gold_before && game.ammo == ammo_before && game.player_health == health_before && game.fireball_unlocked == fireball_before && game.pickup_flash <= 0.0)) {
+        fprintf(stderr, "error: house loot prop did not grant and persist loot\n");
+        return 0;
+    }
+
+    if (!setup_interaction_camera(&cam, game.portals[0].x, game.portals[0].y)) {
+        fprintf(stderr, "error: house exit is not interactable\n");
+        return 0;
+    }
+    interact_world(&game, &cam);
+    double dx = cam.pos.x - return_pos.x;
+    double dy = cam.pos.y - return_pos.y;
+    if (saved_forest.valid || game.generator_mode != GENERATOR_FOREST || game.in_dungeon || dx * dx + dy * dy > 0.001 ||
+        !(game.houses[house_index].loot_mask & (1u << loot_slot))) {
+        fprintf(stderr, "error: house exit did not restore forest with looted state\n");
+        return 0;
+    }
+
+    cam = (Camera){
+        .pos = {house_min_x(&game.houses[house_index]) - 0.70, game.houses[house_index].pos.y},
+        .dir = {1.0, 0.0},
+        .plane = {0.0, 0.66},
+    };
+    interact_world(&game, &cam);
+    if (!saved_forest.valid || game.generator_mode != GENERATOR_HOUSE) {
+        fprintf(stderr, "error: house re-entry failed after looting\n");
+        return 0;
+    }
+    int persisted = 0;
+    for (int i = 0; i < MAX_PROPS; ++i) {
+        if (game.props[i].active && game.props[i].loot_slot == loot_slot && game.props[i].looted) {
+            persisted = 1;
+            break;
+        }
+    }
+    if (!persisted) {
+        fprintf(stderr, "error: looted house prop reset after re-entry\n");
+        return 0;
+    }
+
+    saved_forest.valid = 0;
     return 1;
 }
 
@@ -9259,6 +10098,23 @@ static int verify_boss_sprite_asset(void)
                 fprintf(stderr, "error: boss sprite frame %d anim %d has too few visible pixels\n", frame, anim);
                 return 0;
             }
+        }
+    }
+    return 1;
+}
+
+static int verify_furniture_sprite_asset(void)
+{
+    for (int sprite = 0; sprite < FURNITURE_SPRITE_COUNT; ++sprite) {
+        int visible = 0;
+        for (int i = 0; i < FURNITURE_SIZE * FURNITURE_SIZE; ++i) {
+            if (!is_sprite_key(furniture_sprites[sprite][i])) {
+                visible++;
+            }
+        }
+        if (visible < 90) {
+            fprintf(stderr, "error: furniture sprite %d has too few visible pixels\n", sprite);
+            return 0;
         }
     }
     return 1;
@@ -9637,6 +10493,9 @@ static int dump_frame_mode(const char *path, int mode)
     if (!verify_forest_dungeon_transition()) {
         return 1;
     }
+    if (!verify_forest_house_transition()) {
+        return 1;
+    }
     if (!verify_generated_dungeon_relic_reachability()) {
         return 1;
     }
@@ -9656,6 +10515,9 @@ static int dump_frame_mode(const char *path, int mode)
         return 1;
     }
     if (!verify_boss_sprite_asset()) {
+        return 1;
+    }
+    if (!verify_furniture_sprite_asset()) {
         return 1;
     }
     if (!verify_monster_sprite_assets()) {
@@ -9678,11 +10540,18 @@ static int dump_frame_mode(const char *path, int mode)
     }
     GameState game;
     init_game_seed(&game, LEVEL_TEST_SEED, mode);
+    if (mode == GENERATOR_HOUSE) {
+        cam = (Camera){
+            .pos = {9.20, 12.50},
+            .dir = {1.0, 0.0},
+            .plane = {0.0, 0.66},
+        };
+    }
     reveal_fog(&game, &cam);
     for (int i = 0; i < 45; ++i) {
         update_game(&game, &cam, 1.0 / 60.0);
     }
-    if (mode != GENERATOR_FOREST) {
+    if (mode != GENERATOR_FOREST && mode != GENERATOR_HOUSE) {
         game.fireball_unlocked = 1;
         game.fireball_ammo = 6;
         select_weapon(&game, WEAPON_FIREBALL);
@@ -9725,6 +10594,10 @@ static int parse_generator_mode_name(const char *text, int *out_mode)
     }
     if (strcmp(text, "boss") == 0) {
         *out_mode = GENERATOR_BOSS;
+        return 1;
+    }
+    if (strcmp(text, "house") == 0) {
+        *out_mode = GENERATOR_HOUSE;
         return 1;
     }
     return 0;
@@ -10813,10 +11686,13 @@ int main(int argc, char **argv)
             return 1;
         }
         if (!parse_generator_mode_name(argv[3], &mode)) {
-            fprintf(stderr, "error: --profile-dump expects rooms, forest, tight, or boss mode\n");
+            fprintf(stderr, "error: --profile-dump expects rooms, forest, tight, boss, or house mode\n");
             return 1;
         }
         return profile_dump_frame(argv[4], quality, mode);
+    }
+    if (argc == 3 && strcmp(argv[1], "--dump-house") == 0) {
+        return dump_frame_mode(argv[2], GENERATOR_HOUSE);
     }
     if (argc == 3 && strcmp(argv[1], "--dump-forest") == 0) {
         return dump_frame_mode(argv[2], GENERATOR_FOREST);
