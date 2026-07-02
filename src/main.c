@@ -283,8 +283,11 @@ enum {
 };
 
 enum {
-    RENDER_EFFECTS_FULL = 0,
-    RENDER_EFFECTS_OFF = 1,
+    RENDER_EFFECTS_OFF = 0,
+    RENDER_EFFECTS_PRESET1 = 1,
+    RENDER_EFFECTS_PRESET2 = 2,
+    RENDER_EFFECTS_PRESET3 = 3,
+    RENDER_EFFECTS_COUNT = 4,
 };
 
 enum {
@@ -772,6 +775,8 @@ static double house_min_y(const House *house);
 static double house_max_y(const House *house);
 static Vec2 vec_norm(Vec2 v);
 static double vec_dot(Vec2 a, Vec2 b);
+static int parse_render_effects(const char *text, int *out_effects);
+static const char *render_effects_config_text(int effects);
 static GameState *active_game = NULL;
 static SfxSample sfx_samples[SFX_COUNT];
 static SampleVoice sample_voices[MAX_SAMPLE_VOICES];
@@ -3962,8 +3967,49 @@ static void render_volumetric_fog(const Camera *cam, const GameState *game)
     }
 }
 
-static void render_bloom(void)
+static int normalize_render_effects(int effects)
 {
+    if (effects < 0 || effects >= RENDER_EFFECTS_COUNT) {
+        return RENDER_EFFECTS_OFF;
+    }
+    return effects;
+}
+
+static const char *render_effects_menu_text(int effects)
+{
+    switch (normalize_render_effects(effects)) {
+    case RENDER_EFFECTS_PRESET1:
+        return "POST 1";
+    case RENDER_EFFECTS_PRESET2:
+        return "POST 2";
+    case RENDER_EFFECTS_PRESET3:
+        return "POST 3";
+    default:
+        return "POST OFF";
+    }
+}
+
+static double bloom_strength_for_effects(int effects)
+{
+    switch (normalize_render_effects(effects)) {
+    case RENDER_EFFECTS_PRESET1:
+        return 0.50;
+    case RENDER_EFFECTS_PRESET2:
+        return 0.34;
+    case RENDER_EFFECTS_PRESET3:
+        return 0.68;
+    default:
+        return 0.0;
+    }
+}
+
+static void render_bloom(int effects)
+{
+    double strength = bloom_strength_for_effects(effects);
+    if (strength <= 0.0) {
+        return;
+    }
+
     int limit_y = SCREEN_H - 14;
     for (int y = 0; y < limit_y; ++y) {
         for (int x = 0; x < SCREEN_W; ++x) {
@@ -4006,7 +4052,7 @@ static void render_bloom(void)
                 bloom_work_buffer[idx + SCREEN_W] * 0.08;
             if (s > 0.004) {
                 uint32_t bloom_tint = mix_color(rgb(255, 122, 40), framebuffer[idx], 0.38);
-                framebuffer[idx] = add_color(framebuffer[idx], bloom_tint, s * 0.50);
+                framebuffer[idx] = add_color(framebuffer[idx], bloom_tint, s * strength);
             }
         }
     }
@@ -4075,6 +4121,42 @@ static void render_light_buffer(void)
             }
         }
     }
+}
+
+static uint8_t lut_channel(double value)
+{
+    value = clamp01(value);
+    return clamp_u8((int)(value * 255.0 + 0.5));
+}
+
+static uint32_t apply_color_lut(uint32_t color, int effects)
+{
+    double r = ((color >> 16) & 0xFFu) / 255.0;
+    double g = ((color >> 8) & 0xFFu) / 255.0;
+    double b = (color & 0xFFu) / 255.0;
+    double l = r * 0.299 + g * 0.587 + b * 0.114;
+
+    switch (normalize_render_effects(effects)) {
+    case RENDER_EFFECTS_PRESET1:
+        r = pow(clamp01(r * 1.06 + l * 0.025), 0.96);
+        g = pow(clamp01(g * 1.02 + l * 0.018), 0.98);
+        b = pow(clamp01(b * 0.96 + l * 0.010), 1.03);
+        break;
+    case RENDER_EFFECTS_PRESET2:
+        r = pow(clamp01(r * 0.88 + l * 0.035), 1.08);
+        g = pow(clamp01(g * 1.00 + l * 0.025), 1.00);
+        b = pow(clamp01(b * 1.14 + l * 0.030), 0.94);
+        break;
+    case RENDER_EFFECTS_PRESET3:
+        r = pow(clamp01(r * 1.18 + l * 0.040), 0.90);
+        g = pow(clamp01(g * 0.94 + l * 0.020), 1.02);
+        b = pow(clamp01(b * 0.82 + l * 0.010), 1.12);
+        break;
+    default:
+        break;
+    }
+
+    return rgb(lut_channel(r), lut_channel(g), lut_channel(b));
 }
 
 static void render_muzzle_light(const GameState *game)
@@ -4178,8 +4260,13 @@ static void render_forest_weather_overlay(const GameState *game)
     }
 }
 
-static void render_color_grade(const GameState *game)
+static void render_color_grade(const GameState *game, int effects)
 {
+    effects = normalize_render_effects(effects);
+    if (effects == RENDER_EFFECTS_OFF) {
+        return;
+    }
+
     if (!vignette_ready) {
         for (int y = 0; y < SCREEN_H - 14; ++y) {
             double ny = (y - SCREEN_H * 0.5) / (SCREEN_H * 0.5);
@@ -4196,14 +4283,41 @@ static void render_color_grade(const GameState *game)
             int idx = y * SCREEN_W + x;
             double vignette = vignette_buffer[idx];
             uint32_t c = framebuffer[idx];
-            if (game->generator_mode == GENERATOR_FOREST) {
-                c = contrast_color(c, 1.08, 6.0);
-                c = mix_color(c, rgb(22, 34, 48), vignette * 0.30);
-                c = mix_color(c, rgb(82, 110, 134), 0.055);
-            } else {
-                c = contrast_color(c, 1.12, -5.0);
-                c = mix_color(c, rgb(20, 28, 30), vignette * 0.45);
+            double contrast = 1.12;
+            double brightness = -5.0;
+            uint32_t vignette_tint = rgb(20, 28, 30);
+            double vignette_amount = vignette * 0.45;
+            uint32_t wash = rgb(0, 0, 0);
+            double wash_amount = 0.0;
+
+            if (effects == RENDER_EFFECTS_PRESET2) {
+                contrast = 1.06;
+                brightness = -2.0;
+                vignette_tint = rgb(14, 24, 38);
+                vignette_amount = vignette * 0.38;
+                wash = rgb(54, 80, 112);
+                wash_amount = 0.045;
+            } else if (effects == RENDER_EFFECTS_PRESET3) {
+                contrast = 1.18;
+                brightness = -7.0;
+                vignette_tint = rgb(34, 20, 14);
+                vignette_amount = vignette * 0.50;
+                wash = rgb(118, 56, 28);
+                wash_amount = 0.040;
+            } else if (game->generator_mode == GENERATOR_FOREST) {
+                contrast = 1.08;
+                brightness = 6.0;
+                vignette_tint = rgb(22, 34, 48);
+                vignette_amount = vignette * 0.30;
+                wash = rgb(82, 110, 134);
+                wash_amount = 0.055;
             }
+            c = contrast_color(c, contrast, brightness);
+            c = mix_color(c, vignette_tint, vignette_amount);
+            if (wash_amount > 0.0) {
+                c = mix_color(c, wash, wash_amount);
+            }
+            c = apply_color_lut(c, effects);
             if (light_buffer[idx] > 0.03 || glow_buffer[idx] > 0.03) {
                 c = mix_color(c, rgb(255, 132, 48), clamp01((light_buffer[idx] + glow_buffer[idx]) * 0.05));
             }
@@ -5677,9 +5791,9 @@ static void render_scene(const Camera *cam, const GameState *game)
 
     render_forest_weather_overlay(game);
     render_muzzle_light(game);
-    if (render_effects == RENDER_EFFECTS_FULL) {
+    if (render_effects != RENDER_EFFECTS_OFF) {
         render_light_buffer();
-        render_bloom();
+        render_bloom(render_effects);
     }
     if (profile) {
         uint64_t now = SDL_GetPerformanceCounter();
@@ -5687,9 +5801,9 @@ static void render_scene(const Camera *cam, const GameState *game)
         pass_start = now;
     }
 
-    if (render_effects == RENDER_EFFECTS_FULL) {
+    if (render_effects != RENDER_EFFECTS_OFF) {
         render_edge_antialias();
-        render_color_grade(game);
+        render_color_grade(game, render_effects);
     }
     render_hit_flash(game);
     if (profile) {
@@ -7973,7 +8087,7 @@ static void render_fps_overlay(double fps, double frame_ms, int quality, int eff
     char fps_text[16];
     char ms_text[16];
     const char *quality_text = quality == RENDER_QUALITY_FAST ? "FAST" : "PBR";
-    const char *effects_text = effects == RENDER_EFFECTS_FULL ? "POST ON" : "POST OFF";
+    const char *effects_text = render_effects_menu_text(effects);
     int fps_int = (int)(fps + 0.5);
     int ms_int = (int)(frame_ms + 0.5);
     if (fps_int < 0) fps_int = 0;
@@ -8000,7 +8114,7 @@ static void render_fps_overlay(double fps, double frame_ms, int quality, int eff
     draw_prompt_text(9, 9, fps_text, rgb(230, 226, 190));
     draw_prompt_text(9, 25, ms_text, rgb(176, 196, 174));
     draw_prompt_text(9, 41, quality_text, quality == RENDER_QUALITY_FAST ? rgb(238, 178, 54) : rgb(196, 188, 176));
-    draw_prompt_text(9, 57, effects_text, effects == RENDER_EFFECTS_FULL ? rgb(238, 178, 54) : rgb(156, 166, 154));
+    draw_prompt_text(9, 57, effects_text, effects != RENDER_EFFECTS_OFF ? rgb(238, 178, 54) : rgb(156, 166, 154));
 }
 
 static void draw_timing_line(int y, const char *label, double ms, uint32_t color)
@@ -8454,7 +8568,7 @@ static const char *menu_item_description(int page, int item)
         case SETTINGS_MENU_ITEM_QUALITY:
             return "PBR LADNIE FAST SZYBKO";
         case SETTINGS_MENU_ITEM_POST:
-            return "BLOOM AA KOLOR";
+            return "BLOOM I LUT KOLORU";
         case SETTINGS_MENU_ITEM_SFX_VOLUME:
             return "GLOSNOSC EFEKTOW";
         case SETTINGS_MENU_ITEM_MUSIC_VOLUME:
@@ -8509,7 +8623,7 @@ static void render_game_menu(int page,
     const char *settings_items[SETTINGS_MENU_ITEM_COUNT] = {
         difficulty_menu_text(difficulty),
         quality == RENDER_QUALITY_FAST ? "JAKOSC FAST" : "JAKOSC PBR",
-        effects == RENDER_EFFECTS_FULL ? "POST ON" : "POST OFF",
+        render_effects_menu_text(effects),
         "EFEKTY",
         "MUZYKA",
         fullscreen ? "FULLSCREEN ON" : "FULLSCREEN OFF",
@@ -10562,6 +10676,41 @@ static int verify_fm_instrument_distribution(void)
     return 1;
 }
 
+static int verify_render_effect_presets(void)
+{
+    static const struct {
+        const char *text;
+        int expected;
+    } checks[] = {
+        {"off", RENDER_EFFECTS_OFF},
+        {"full", RENDER_EFFECTS_PRESET1},
+        {"1", RENDER_EFFECTS_PRESET1},
+        {"preset2", RENDER_EFFECTS_PRESET2},
+        {"lut3", RENDER_EFFECTS_PRESET3},
+    };
+
+    for (int i = 0; i < (int)(sizeof(checks) / sizeof(checks[0])); ++i) {
+        int effects = -1;
+        if (!parse_render_effects(checks[i].text, &effects) || effects != checks[i].expected) {
+            fprintf(stderr, "error: render effects preset parser rejected %s\n", checks[i].text);
+            return 0;
+        }
+    }
+    if (strcmp(render_effects_config_text(RENDER_EFFECTS_PRESET1), "preset1") != 0 ||
+        strcmp(render_effects_config_text(RENDER_EFFECTS_PRESET2), "preset2") != 0 ||
+        strcmp(render_effects_config_text(RENDER_EFFECTS_PRESET3), "preset3") != 0 ||
+        strcmp(render_effects_config_text(RENDER_EFFECTS_OFF), "off") != 0) {
+        fprintf(stderr, "error: render effects preset config text is invalid\n");
+        return 0;
+    }
+    if (normalize_render_effects(-1) != RENDER_EFFECTS_OFF ||
+        normalize_render_effects(RENDER_EFFECTS_COUNT) != RENDER_EFFECTS_OFF) {
+        fprintf(stderr, "error: render effects normalization is invalid\n");
+        return 0;
+    }
+    return 1;
+}
+
 static int verify_help_key_close(void)
 {
     GameState game;
@@ -11063,6 +11212,9 @@ static int dump_frame_mode(const char *path, int mode)
         return 1;
     }
     if (!verify_fm_instrument_distribution()) {
+        return 1;
+    }
+    if (!verify_render_effect_presets()) {
         return 1;
     }
     if (!verify_help_key_close()) {
@@ -11568,9 +11720,10 @@ static void toggle_runtime_render_quality(Runtime *rt)
     save_runtime_settings(rt);
 }
 
-static void toggle_runtime_render_effects(Runtime *rt)
+static void cycle_runtime_render_effects(Runtime *rt, int delta)
 {
-    rt->render_effects = rt->render_effects == RENDER_EFFECTS_FULL ? RENDER_EFFECTS_OFF : RENDER_EFFECTS_FULL;
+    rt->render_effects = normalize_render_effects(rt->render_effects);
+    rt->render_effects = (rt->render_effects + delta + RENDER_EFFECTS_COUNT) % RENDER_EFFECTS_COUNT;
     save_runtime_settings(rt);
 }
 
@@ -11593,7 +11746,7 @@ static void adjust_runtime_settings_item(Runtime *rt, int item, int delta)
     } else if (item == SETTINGS_MENU_ITEM_QUALITY) {
         toggle_runtime_render_quality(rt);
     } else if (item == SETTINGS_MENU_ITEM_POST) {
-        toggle_runtime_render_effects(rt);
+        cycle_runtime_render_effects(rt, delta);
     } else if (item == SETTINGS_MENU_ITEM_SFX_VOLUME) {
         adjust_runtime_audio_volume(rt, 0, delta);
     } else if (item == SETTINGS_MENU_ITEM_MUSIC_VOLUME) {
@@ -11712,8 +11865,17 @@ static int parse_render_quality(const char *text, int *out_quality)
 
 static int parse_render_effects(const char *text, int *out_effects)
 {
-    if (strcmp(text, "full") == 0) {
-        *out_effects = RENDER_EFFECTS_FULL;
+    if (strcmp(text, "full") == 0 || strcmp(text, "on") == 0 ||
+        strcmp(text, "1") == 0 || strcmp(text, "preset1") == 0 || strcmp(text, "lut1") == 0) {
+        *out_effects = RENDER_EFFECTS_PRESET1;
+        return 1;
+    }
+    if (strcmp(text, "2") == 0 || strcmp(text, "preset2") == 0 || strcmp(text, "lut2") == 0) {
+        *out_effects = RENDER_EFFECTS_PRESET2;
+        return 1;
+    }
+    if (strcmp(text, "3") == 0 || strcmp(text, "preset3") == 0 || strcmp(text, "lut3") == 0) {
+        *out_effects = RENDER_EFFECTS_PRESET3;
         return 1;
     }
     if (strcmp(text, "off") == 0) {
@@ -11730,7 +11892,16 @@ static const char *render_quality_config_text(int quality)
 
 static const char *render_effects_config_text(int effects)
 {
-    return effects == RENDER_EFFECTS_FULL ? "full" : "off";
+    switch (normalize_render_effects(effects)) {
+    case RENDER_EFFECTS_PRESET1:
+        return "preset1";
+    case RENDER_EFFECTS_PRESET2:
+        return "preset2";
+    case RENDER_EFFECTS_PRESET3:
+        return "preset3";
+    default:
+        return "off";
+    }
 }
 
 static void init_runtime_config_defaults(RuntimeConfig *config)
@@ -11826,6 +11997,7 @@ static int load_runtime_settings(RuntimeConfig *config)
     }
     fclose(f);
     config->difficulty = normalize_difficulty(config->difficulty);
+    config->render_effects = normalize_render_effects(config->render_effects);
     config->sfx_volume = clamp_volume_step(config->sfx_volume);
     config->music_volume = clamp_volume_step(config->music_volume);
     config->trainer = config->trainer ? 1 : 0;
@@ -11881,7 +12053,7 @@ static int parse_runtime_config(int argc, char **argv, RuntimeConfig *config)
             i += 1;
         } else if (strcmp(argv[i], "--effects") == 0) {
             if (i + 1 >= argc || !parse_render_effects(argv[i + 1], &config->render_effects)) {
-                fprintf(stderr, "error: --effects expects full or off\n");
+                fprintf(stderr, "error: --effects expects off, 1, 2, or 3\n");
                 return 0;
             }
             i += 1;
@@ -11984,7 +12156,7 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
     runtime_trainer = rt->trainer;
     runtime_level_seed = LEVEL_TEST_SEED ^ (uint32_t)SDL_GetTicks() ^ (uint32_t)SDL_GetPerformanceCounter();
     rt->render_quality = config->render_quality;
-    rt->render_effects = config->render_effects;
+    rt->render_effects = normalize_render_effects(config->render_effects);
     render_quality = rt->render_quality;
     render_effects = rt->render_effects;
     rt->sfx_volume = clamp_volume_step(config->sfx_volume);
@@ -12094,7 +12266,7 @@ static void runtime_frame(void *userdata)
                 } else if (key == SDLK_F5 && event.key.repeat == 0) {
                     toggle_runtime_render_quality(rt);
                 } else if (key == SDLK_F6 && event.key.repeat == 0) {
-                    toggle_runtime_render_effects(rt);
+                    cycle_runtime_render_effects(rt, 1);
                 } else if (key == SDLK_F11 && event.key.repeat == 0) {
                     if (!toggle_runtime_fullscreen(rt)) {
                         rt->running = 0;
@@ -12169,7 +12341,7 @@ static void runtime_frame(void *userdata)
             } else if (key == SDLK_F5 && event.key.repeat == 0) {
                 toggle_runtime_render_quality(rt);
             } else if (key == SDLK_F6 && event.key.repeat == 0) {
-                toggle_runtime_render_effects(rt);
+                cycle_runtime_render_effects(rt, 1);
             } else if (key == SDLK_F11 && event.key.repeat == 0) {
                 if (!toggle_runtime_fullscreen(rt)) {
                     rt->running = 0;
