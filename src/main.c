@@ -90,8 +90,13 @@
 #define LEVEL_TEST_SEED 0x00C0FFEEu
 #define PLAYER_MAX_HEALTH 160
 #define START_AMMO 48
+#define MAX_PISTOL_AMMO 99
 #define START_FIREBALL_AMMO 0
 #define MAX_FIREBALL_AMMO 24
+#define SHOP_AMMO_PRICE 20
+#define SHOP_HEALTH_PRICE 35
+#define SHOP_AMMO_AMOUNT 18
+#define SHOP_HEALTH_AMOUNT 45
 #define KNIFE_DAMAGE 3
 #define KNIFE_RANGE 1.35
 #define KNIFE_COOLDOWN_TIME 0.36
@@ -202,6 +207,13 @@ enum {
     ITEM_SPRITE_PORTAL_BOSS_OPEN,
     ITEM_SPRITE_BOLT,
     ITEM_SPRITE_EXPLOSION,
+};
+
+enum {
+    SHOP_ITEM_AMMO = 0,
+    SHOP_ITEM_HEALTH,
+    SHOP_ITEM_EXIT,
+    SHOP_ITEM_COUNT
 };
 
 enum {
@@ -4373,6 +4385,7 @@ static void render_interaction_prompt(const Camera *cam, const GameState *game);
 static void render_help_overlay(const GameState *game);
 static void render_relic_notice(const GameState *game);
 static void render_victory_screen(void);
+static int can_buy_merchant_shop_item(const GameState *game, int item);
 
 static void render_screen_ellipse(int cx, int cy, int rx, int ry, double depth, uint32_t color, double strength)
 {
@@ -4766,150 +4779,6 @@ static double prop_footprint_radius(const Prop *prop)
     return fmin(prop->half_w, prop->half_d);
 }
 
-typedef struct {
-    const Prop *prop;
-    double depth;
-    double hit_x;
-    double hit_y;
-    double u;
-    double normal_x;
-    double normal_y;
-    int face;
-} PropHit;
-
-static int intersect_prop_cylinder_ray(const Prop *prop, const Camera *cam, double ray_dir_x, double ray_dir_y, PropHit *hit)
-{
-    double radius = prop_footprint_radius(prop);
-    if (radius <= 0.02) {
-        return 0;
-    }
-
-    double ox = cam->pos.x - prop->pos.x;
-    double oy = cam->pos.y - prop->pos.y;
-    double a = ray_dir_x * ray_dir_x + ray_dir_y * ray_dir_y;
-    double b = 2.0 * (ox * ray_dir_x + oy * ray_dir_y);
-    double c = ox * ox + oy * oy - radius * radius;
-    double disc = b * b - 4.0 * a * c;
-    if (a <= 0.000001 || disc < 0.0) {
-        return 0;
-    }
-
-    double sqrt_disc = sqrt(disc);
-    double inv = 0.5 / a;
-    double depth = (-b - sqrt_disc) * inv;
-    if (depth <= HOUSE_RENDER_NEAR_CLIP) {
-        depth = (-b + sqrt_disc) * inv;
-    }
-    if (depth <= HOUSE_RENDER_NEAR_CLIP) {
-        return 0;
-    }
-
-    double hit_x = cam->pos.x + ray_dir_x * depth;
-    double hit_y = cam->pos.y + ray_dir_y * depth;
-    double normal_x = (hit_x - prop->pos.x) / radius;
-    double normal_y = (hit_y - prop->pos.y) / radius;
-    double normal_len = sqrt(normal_x * normal_x + normal_y * normal_y);
-    if (normal_len > 0.000001) {
-        normal_x /= normal_len;
-        normal_y /= normal_len;
-    }
-
-    double angle = atan2(normal_y, normal_x);
-    double u = (angle + M_PI) / (M_PI * 2.0);
-    hit->prop = prop;
-    hit->depth = depth;
-    hit->hit_x = hit_x;
-    hit->hit_y = hit_y;
-    hit->u = clamp01(u);
-    hit->normal_x = normal_x;
-    hit->normal_y = normal_y;
-    hit->face = -1;
-    return 1;
-}
-
-static int intersect_prop_ray(const Prop *prop, const Camera *cam, double ray_dir_x, double ray_dir_y, PropHit *hit)
-{
-    if (!prop->active || prop->height <= 0.02) {
-        return 0;
-    }
-    if (prop_is_cylinder(prop)) {
-        return intersect_prop_cylinder_ray(prop, cam, ray_dir_x, ray_dir_y, hit);
-    }
-
-    double t_min = -1e30;
-    double t_max = 1e30;
-    int face = -1;
-
-    if (fabs(ray_dir_x) < 0.000001) {
-        if (cam->pos.x < prop_min_x(prop) || cam->pos.x > prop_max_x(prop)) {
-            return 0;
-        }
-    } else {
-        double tx1 = (prop_min_x(prop) - cam->pos.x) / ray_dir_x;
-        double tx2 = (prop_max_x(prop) - cam->pos.x) / ray_dir_x;
-        int near_face = ray_dir_x > 0.0 ? HOUSE_FACE_WEST : HOUSE_FACE_EAST;
-        if (tx1 > tx2) {
-            double t = tx1;
-            tx1 = tx2;
-            tx2 = t;
-        }
-        if (tx1 > t_min) {
-            t_min = tx1;
-            face = near_face;
-        }
-        if (tx2 < t_max) t_max = tx2;
-    }
-
-    if (fabs(ray_dir_y) < 0.000001) {
-        if (cam->pos.y < prop_min_y(prop) || cam->pos.y > prop_max_y(prop)) {
-            return 0;
-        }
-    } else {
-        double ty1 = (prop_min_y(prop) - cam->pos.y) / ray_dir_y;
-        double ty2 = (prop_max_y(prop) - cam->pos.y) / ray_dir_y;
-        int near_face = ray_dir_y > 0.0 ? HOUSE_FACE_NORTH : HOUSE_FACE_SOUTH;
-        if (ty1 > ty2) {
-            double t = ty1;
-            ty1 = ty2;
-            ty2 = t;
-        }
-        if (ty1 > t_min) {
-            t_min = ty1;
-            face = near_face;
-        }
-        if (ty2 < t_max) t_max = ty2;
-    }
-
-    if (face < 0 || t_min > t_max || t_min <= HOUSE_RENDER_NEAR_CLIP) {
-        return 0;
-    }
-
-    double hit_x = cam->pos.x + ray_dir_x * t_min;
-    double hit_y = cam->pos.y + ray_dir_y * t_min;
-    double u;
-    if (face == HOUSE_FACE_WEST || face == HOUSE_FACE_EAST) {
-        u = (hit_y - prop_min_y(prop)) / (prop_max_y(prop) - prop_min_y(prop));
-        if (face == HOUSE_FACE_EAST) {
-            u = 1.0 - u;
-        }
-    } else {
-        u = (hit_x - prop_min_x(prop)) / (prop_max_x(prop) - prop_min_x(prop));
-        if (face == HOUSE_FACE_NORTH) {
-            u = 1.0 - u;
-        }
-    }
-
-    hit->prop = prop;
-    hit->depth = t_min;
-    hit->hit_x = hit_x;
-    hit->hit_y = hit_y;
-    hit->u = clamp01(u);
-    hit->normal_x = face == HOUSE_FACE_WEST ? -1.0 : (face == HOUSE_FACE_EAST ? 1.0 : 0.0);
-    hit->normal_y = face == HOUSE_FACE_NORTH ? -1.0 : (face == HOUSE_FACE_SOUTH ? 1.0 : 0.0);
-    hit->face = face;
-    return 1;
-}
-
 static double prop_face_light(int face)
 {
     switch (face) {
@@ -4919,15 +4788,6 @@ static double prop_face_light(int face)
     case HOUSE_FACE_NORTH: return 0.40;
     default: return 0.45;
     }
-}
-
-static double prop_hit_face_light(const PropHit *hit)
-{
-    if (hit->prop && prop_is_cylinder(hit->prop)) {
-        double light = 0.48 - hit->normal_x * 0.07 + hit->normal_y * 0.04;
-        return fmax(0.38, fmin(0.60, light));
-    }
-    return prop_face_light(hit->face);
 }
 
 static void render_prop_triangle(const GameState *game, TexturedPoint a, TexturedPoint b, TexturedPoint c, const Prop *prop, double light)
@@ -4983,6 +4843,71 @@ static void render_prop_triangle(const GameState *game, TexturedPoint a, Texture
     }
 }
 
+static double prop_surface_light(const Camera *cam, const GameState *game, double world_x, double world_y, double face_light)
+{
+    double depth = (world_x - cam->pos.x) * cam->dir.x + (world_y - cam->pos.y) * cam->dir.y;
+    if (depth < 0.10) {
+        depth = 0.10;
+    }
+    double torch_light = clamp01(torch_light_at(world_x, world_y, game->time) * 0.52 +
+                                 player_torch_light_at(cam, game, world_x, world_y) * 0.58);
+    return (face_light + torch_light * 0.75) / (1.0 + depth * 0.050);
+}
+
+static void render_prop_quad(const GameState *game, TexturedPoint a, TexturedPoint b, TexturedPoint c, TexturedPoint d, const Prop *prop, double light)
+{
+    render_prop_triangle(game, a, b, c, prop, light);
+    render_prop_triangle(game, a, c, d, prop, light * 0.98);
+}
+
+static void render_prop_vertical_quad(const Camera *cam,
+                                      const GameState *game,
+                                      const Prop *prop,
+                                      double ax,
+                                      double ay,
+                                      double bx,
+                                      double by,
+                                      double u0,
+                                      double u1,
+                                      double light)
+{
+    ProjectedPoint bottom_a;
+    ProjectedPoint bottom_b;
+    ProjectedPoint top_b;
+    ProjectedPoint top_a;
+    if (!project_world_point(cam, ax, ay, 0.0, &bottom_a) ||
+        !project_world_point(cam, bx, by, 0.0, &bottom_b) ||
+        !project_world_point(cam, bx, by, prop->height, &top_b) ||
+        !project_world_point(cam, ax, ay, prop->height, &top_a)) {
+        return;
+    }
+
+    TexturedPoint a = {bottom_a, u0, 1.0};
+    TexturedPoint b = {bottom_b, u1, 1.0};
+    TexturedPoint c = {top_b, u1, 0.0};
+    TexturedPoint d = {top_a, u0, 0.0};
+    render_prop_quad(game, a, b, c, d, prop, light);
+}
+
+static void render_prop_box_sides(const Camera *cam, const GameState *game, const Prop *prop)
+{
+    double x0 = prop_min_x(prop);
+    double x1 = prop_max_x(prop);
+    double y0 = prop_min_y(prop);
+    double y1 = prop_max_y(prop);
+    double cx = prop->pos.x;
+    double cy = prop->pos.y;
+
+    render_prop_vertical_quad(cam, game, prop, x0, y1, x0, y0, 0.0, 1.0,
+                              prop_surface_light(cam, game, x0, cy, prop_face_light(HOUSE_FACE_WEST)));
+    render_prop_vertical_quad(cam, game, prop, x1, y0, x1, y1, 0.0, 1.0,
+                              prop_surface_light(cam, game, x1, cy, prop_face_light(HOUSE_FACE_EAST)));
+    render_prop_vertical_quad(cam, game, prop, x0, y0, x1, y0, 0.0, 1.0,
+                              prop_surface_light(cam, game, cx, y0, prop_face_light(HOUSE_FACE_NORTH)));
+    render_prop_vertical_quad(cam, game, prop, x1, y1, x0, y1, 0.0, 1.0,
+                              prop_surface_light(cam, game, cx, y1, prop_face_light(HOUSE_FACE_SOUTH)));
+}
+
 static void render_prop_top(const Camera *cam, const GameState *game, const Prop *prop)
 {
     ProjectedPoint p00;
@@ -5004,6 +4929,37 @@ static void render_prop_top(const Camera *cam, const GameState *game, const Prop
     TexturedPoint d = {p01, 0.0, 1.0};
     render_prop_triangle(game, a, b, c, prop, light);
     render_prop_triangle(game, a, c, d, prop, light * 0.96);
+}
+
+static void render_prop_cylinder_sides(const Camera *cam, const GameState *game, const Prop *prop)
+{
+    double radius = prop_footprint_radius(prop);
+    if (radius <= 0.02) {
+        return;
+    }
+
+    const int segments = 18;
+    for (int i = 0; i < segments; ++i) {
+        double a0 = i * (M_PI * 2.0 / segments);
+        double a1 = (i + 1) * (M_PI * 2.0 / segments);
+        double mid = (a0 + a1) * 0.5;
+        double normal_x = cos(mid);
+        double normal_y = sin(mid);
+        double face_light = fmax(0.38, fmin(0.60, 0.48 - normal_x * 0.07 + normal_y * 0.04));
+        double sx = prop->pos.x + normal_x * radius;
+        double sy = prop->pos.y + normal_y * radius;
+        double light = prop_surface_light(cam, game, sx, sy, face_light);
+        render_prop_vertical_quad(cam,
+                                  game,
+                                  prop,
+                                  prop->pos.x + cos(a0) * radius,
+                                  prop->pos.y + sin(a0) * radius,
+                                  prop->pos.x + cos(a1) * radius,
+                                  prop->pos.y + sin(a1) * radius,
+                                  i / (double)segments,
+                                  (i + 1) / (double)segments,
+                                  light);
+    }
 }
 
 static void render_prop_cylinder_top(const Camera *cam, const GameState *game, const Prop *prop)
@@ -5040,63 +4996,17 @@ static void render_props_3d(const Camera *cam, const GameState *game)
     }
 
     for (int i = 0; i < MAX_PROPS; ++i) {
-        if (game->props[i].active) {
-            if (prop_is_cylinder(&game->props[i])) {
-                render_prop_cylinder_top(cam, game, &game->props[i]);
-            } else {
-                render_prop_top(cam, game, &game->props[i]);
-            }
-        }
-    }
-
-    for (int x = 0; x < SCREEN_W; ++x) {
-        double camera_x = 2.0 * x / (double)SCREEN_W - 1.0;
-        double ray_dir_x = cam->dir.x + cam->plane.x * camera_x;
-        double ray_dir_y = cam->dir.y + cam->plane.y * camera_x;
-
-        PropHit best;
-        memset(&best, 0, sizeof(best));
-        best.depth = 1e30;
-        for (int i = 0; i < MAX_PROPS; ++i) {
-            PropHit hit;
-            if (intersect_prop_ray(&game->props[i], cam, ray_dir_x, ray_dir_y, &hit) && hit.depth < best.depth) {
-                best = hit;
-            }
-        }
-        if (!best.prop || best.depth >= z_buffer[x]) {
+        const Prop *prop = &game->props[i];
+        if (!prop->active || prop->height <= 0.02) {
             continue;
         }
-
-        double raw_top = SCREEN_H * 0.5 - SCREEN_H * (best.prop->height - 0.5) / best.depth;
-        double raw_bottom = SCREEN_H * 0.5 + SCREEN_H * 0.5 / best.depth;
-        if (raw_bottom <= raw_top + 1.0) {
-            continue;
+        if (prop_is_cylinder(prop)) {
+            render_prop_cylinder_sides(cam, game, prop);
+            render_prop_cylinder_top(cam, game, prop);
+        } else {
+            render_prop_box_sides(cam, game, prop);
+            render_prop_top(cam, game, prop);
         }
-
-        int draw_start = (int)floor(raw_top);
-        int draw_end = (int)ceil(raw_bottom);
-        if (draw_start < 0) draw_start = 0;
-        if (draw_end >= SCREEN_H - 14) draw_end = SCREEN_H - 15;
-        if (draw_start > draw_end) {
-            continue;
-        }
-
-        double face_light = prop_hit_face_light(&best);
-        double torch_light = clamp01(torch_light_at(best.hit_x, best.hit_y, game->time) * 0.52 + player_torch_light_at(cam, game, best.hit_x, best.hit_y) * 0.58);
-        double light = (face_light + torch_light * 0.75) / (1.0 + best.depth * 0.050);
-
-        for (int y = draw_start; y <= draw_end; ++y) {
-            double v = (y + 0.5 - raw_top) / (raw_bottom - raw_top);
-            uint32_t color = prop_texel(best.prop, best.u, v);
-            uint32_t lit = shade(color, light);
-            if (best.prop->looted && best.prop->loot_slot >= 0) {
-                lit = mix_color(lit, rgb(32, 26, 22), 0.20);
-            }
-            framebuffer[y * SCREEN_W + x] = apply_game_fog(game, lit, best.depth, 0.74);
-            depth_buffer[y * SCREEN_W + x] = best.depth;
-            add_light(x, y, torch_light * 0.08);
-        }
-        z_buffer[x] = best.depth;
     }
 }
 
@@ -6656,6 +6566,7 @@ static void place_house_prop(GameState *game,
 
 static void place_house_exit_portal(GameState *game)
 {
+    level_map[12][7] = WALL_DOOR;
     game->portals[0] = (Portal){
         .active = 1,
         .x = 7,
@@ -6744,7 +6655,7 @@ static void place_dungeon_exit_portal(GameState *game)
     game->portals[0] = (Portal){
         .active = 1,
         .x = 3,
-        .y = 21,
+        .y = 22,
         .target_mode = GENERATOR_FOREST,
         .exit_to_forest = 1,
         .relic_index = -1,
@@ -7150,7 +7061,7 @@ static void init_game_seed(GameState *game, uint32_t seed, int mode)
     game->difficulty = normalize_difficulty(runtime_difficulty);
     game->trainer = runtime_trainer ? 1 : 0;
     game->player_health = PLAYER_MAX_HEALTH;
-    game->ammo = game->trainer ? 99 : START_AMMO;
+    game->ammo = game->trainer ? MAX_PISTOL_AMMO : START_AMMO;
     game->fireball_ammo = game->trainer ? MAX_FIREBALL_AMMO : START_FIREBALL_AMMO;
     game->selected_weapon = WEAPON_KNIFE;
     game->pistol_unlocked = 0;
@@ -7678,8 +7589,8 @@ static void pickup_item(GameState *game, Item *item)
         break;
     case ITEM_AMMO:
         game->ammo += 18;
-        if (game->ammo > 99) {
-            game->ammo = 99;
+        if (game->ammo > MAX_PISTOL_AMMO) {
+            game->ammo = MAX_PISTOL_AMMO;
         }
         break;
     case ITEM_RAPID:
@@ -7700,8 +7611,8 @@ static void pickup_item(GameState *game, Item *item)
         game->pistol_unlocked = 1;
         game->selected_weapon = WEAPON_PISTOL;
         game->ammo += 12;
-        if (game->ammo > 99) {
-            game->ammo = 99;
+        if (game->ammo > MAX_PISTOL_AMMO) {
+            game->ammo = MAX_PISTOL_AMMO;
         }
         break;
     case ITEM_GOLD:
@@ -7976,6 +7887,21 @@ static const House *active_house_prompt(const GameState *game, const Camera *cam
     return best;
 }
 
+static int is_merchant_house_index(int house_index)
+{
+    return house_index == 0;
+}
+
+static const House *active_merchant_house_prompt(const GameState *game, const Camera *cam)
+{
+    int house_index = -1;
+    const House *house = active_house_prompt(game, cam, &house_index);
+    if (!house || !is_merchant_house_index(house_index)) {
+        return NULL;
+    }
+    return house;
+}
+
 static int active_prop_index(const GameState *game, const Camera *cam)
 {
     if (!game || game->generator_mode != GENERATOR_HOUSE) {
@@ -8043,7 +7969,10 @@ static void render_interaction_prompt(const Camera *cam, const GameState *game)
 
     int house_index = -1;
     if (active_house_prompt(game, cam, &house_index)) {
-        (void)house_index;
+        if (is_merchant_house_index(house_index)) {
+            render_interaction_label("E HANDEL");
+            return;
+        }
         render_interaction_label("F WEJDZ");
         return;
     }
@@ -8083,6 +8012,89 @@ static void render_centered_prompt_line_styled(int y, const char *text, uint32_t
 static void render_centered_prompt_line(int y, const char *text, uint32_t color)
 {
     render_centered_prompt_line_styled(y, text, color, 0, 0);
+}
+
+static const char *merchant_shop_item_name(int item)
+{
+    switch (item) {
+    case SHOP_ITEM_AMMO: return "AMUNICJA";
+    case SHOP_ITEM_HEALTH: return "APTECZKA";
+    case SHOP_ITEM_EXIT: return "WYJDZ";
+    default: return "";
+    }
+}
+
+static int merchant_shop_item_price(int item)
+{
+    switch (item) {
+    case SHOP_ITEM_AMMO: return SHOP_AMMO_PRICE;
+    case SHOP_ITEM_HEALTH: return SHOP_HEALTH_PRICE;
+    default: return 0;
+    }
+}
+
+static void render_merchant_shop_row(const GameState *game, int item, int selected, int y)
+{
+    char line[64];
+    uint32_t color = selected ? rgb(246, 224, 158) : rgb(204, 188, 142);
+    int disabled = 0;
+
+    if (item == SHOP_ITEM_EXIT) {
+        snprintf(line, sizeof(line), "%s", merchant_shop_item_name(item));
+    } else {
+        int price = merchant_shop_item_price(item);
+        disabled = !can_buy_merchant_shop_item(game, item);
+        if ((item == SHOP_ITEM_AMMO && game->ammo >= MAX_PISTOL_AMMO) ||
+            (item == SHOP_ITEM_HEALTH && game->player_health >= PLAYER_MAX_HEALTH)) {
+            snprintf(line, sizeof(line), "%s  PELNE", merchant_shop_item_name(item));
+        } else {
+            snprintf(line, sizeof(line), "%s  %d ZL", merchant_shop_item_name(item), price);
+        }
+    }
+
+    if (disabled) {
+        color = selected ? rgb(168, 124, 92) : rgb(112, 96, 78);
+    }
+
+    int x = SCREEN_W / 2 - 118;
+    int w = 236;
+    if (selected) {
+        fill_rect(x, y - 6, w, 24, rgb(88, 58, 30));
+        fill_rect(x + 2, y - 4, w - 4, 20, rgb(38, 28, 18));
+    }
+    draw_prompt_text(x + 14, y + 1, line, rgb(18, 12, 8));
+    draw_prompt_text(x + 13, y, line, color);
+}
+
+static void render_merchant_shop_screen(const GameState *game, int selected)
+{
+    char gold_text[32];
+    char ammo_text[32];
+    char health_text[32];
+    int x = SCREEN_W / 2 - 158;
+    int y = SCREEN_H / 2 - 142;
+    int w = 316;
+    int h = 264;
+
+    blend_rect(0, 0, SCREEN_W, SCREEN_H, rgb(0, 0, 0), 0.64);
+    fill_rect(x, y, w, h, rgb(12, 9, 7));
+    fill_rect(x + 3, y + 3, w - 6, h - 6, rgb(58, 38, 22));
+    fill_rect(x + 9, y + 9, w - 18, h - 18, rgb(18, 14, 10));
+    fill_rect(x + 18, y + 50, w - 36, 1, rgb(160, 106, 42));
+    fill_rect(x + 18, y + h - 46, w - 36, 1, rgb(86, 58, 34));
+
+    render_centered_prompt_line(y + 17, "HANDLARZ", rgb(246, 224, 158));
+    snprintf(gold_text, sizeof(gold_text), "ZLOTO %d", game->gold);
+    snprintf(ammo_text, sizeof(ammo_text), "AMMO %d", game->ammo);
+    snprintf(health_text, sizeof(health_text), "HP %d", game->player_health);
+    draw_prompt_text(x + 28, y + 62, gold_text, rgb(238, 178, 54));
+    draw_prompt_text(x + 28, y + 82, ammo_text, rgb(206, 190, 150));
+    draw_prompt_text(x + 178, y + 82, health_text, rgb(206, 190, 150));
+
+    render_merchant_shop_row(game, SHOP_ITEM_AMMO, selected == SHOP_ITEM_AMMO, y + 118);
+    render_merchant_shop_row(game, SHOP_ITEM_HEALTH, selected == SHOP_ITEM_HEALTH, y + 150);
+    render_merchant_shop_row(game, SHOP_ITEM_EXIT, selected == SHOP_ITEM_EXIT, y + 194);
+    render_centered_prompt_line(y + h - 28, "ENTER KUP  ESC WYJDZ", rgb(142, 126, 94));
 }
 
 static void render_victory_screen(void)
@@ -8502,9 +8514,9 @@ static void enter_house_from_forest(GameState *game, Camera *cam, int house_inde
     sync_relic_progress(game);
     set_active_music_track(MUSIC_TRACK_DIES_IRAE);
     *cam = (Camera){
-        .pos = {9.20, 12.50},
-        .dir = {1.0, 0.0},
-        .plane = {0.0, 0.66},
+        .pos = {8.35, 12.50},
+        .dir = {-1.0, 0.0},
+        .plane = {0.0, -0.66},
     };
     reveal_fog(game, cam);
     play_sfx(SFX_DOOR, 0.48);
@@ -8560,6 +8572,46 @@ static void loot_prop(GameState *game, Prop *prop)
     pickup_item(game, &loot);
 }
 
+static int can_buy_merchant_shop_item(const GameState *game, int item)
+{
+    if (!game) {
+        return 0;
+    }
+    if (item == SHOP_ITEM_AMMO) {
+        return game->gold >= SHOP_AMMO_PRICE && game->ammo < MAX_PISTOL_AMMO;
+    }
+    if (item == SHOP_ITEM_HEALTH) {
+        return game->gold >= SHOP_HEALTH_PRICE && game->player_health < PLAYER_MAX_HEALTH;
+    }
+    return 0;
+}
+
+static int buy_merchant_shop_item(GameState *game, int item)
+{
+    if (!can_buy_merchant_shop_item(game, item)) {
+        return 0;
+    }
+    if (item == SHOP_ITEM_AMMO) {
+        game->gold -= SHOP_AMMO_PRICE;
+        game->ammo += SHOP_AMMO_AMOUNT;
+        if (game->ammo > MAX_PISTOL_AMMO) {
+            game->ammo = MAX_PISTOL_AMMO;
+        }
+        game->pickup_flash = 0.22;
+        return 1;
+    }
+    if (item == SHOP_ITEM_HEALTH) {
+        game->gold -= SHOP_HEALTH_PRICE;
+        game->player_health += SHOP_HEALTH_AMOUNT;
+        if (game->player_health > PLAYER_MAX_HEALTH) {
+            game->player_health = PLAYER_MAX_HEALTH;
+        }
+        game->pickup_flash = 0.22;
+        return 1;
+    }
+    return 0;
+}
+
 static void interact_world(GameState *game, Camera *cam)
 {
     int tx = (int)(cam->pos.x + cam->dir.x * 0.95);
@@ -8588,6 +8640,10 @@ static void interact_world(GameState *game, Camera *cam)
 
     int house_index = -1;
     if (active_house_prompt(game, cam, &house_index)) {
+        if (is_merchant_house_index(house_index)) {
+            play_sfx(SFX_LOCKED, 0.28);
+            return;
+        }
         enter_house_from_forest(game, cam, house_index);
         return;
     }
@@ -9576,9 +9632,9 @@ static int verify_generator_modes(void)
         GameState game;
         init_game_seed(&game, LEVEL_TEST_SEED + (uint32_t)mode * 97u, mode);
 
-        double entrance_x = mode == GENERATOR_HOUSE ? 9.20 : 2.5;
+        double entrance_x = mode == GENERATOR_HOUSE ? 8.35 : 2.5;
         double entrance_y = mode == GENERATOR_HOUSE ? 12.50 : 22.5;
-        double check_x = mode == GENERATOR_HOUSE ? 9.5 : 4.5;
+        double check_x = mode == GENERATOR_HOUSE ? 8.5 : 4.5;
         double check_y = mode == GENERATOR_HOUSE ? 12.5 : 22.5;
         if (game.generator_mode != mode || !can_move(entrance_x, entrance_y) || !can_occupy(check_x, check_y, 0.12)) {
             fprintf(stderr, "error: generator mode %d did not create a valid entrance\n", mode);
@@ -9732,6 +9788,16 @@ static int verify_forest_dungeon_transition(void)
         fprintf(stderr, "error: dungeon entry did not preserve player weapon state\n");
         return 0;
     }
+    int screen_x = 0;
+    int sprite_h = 0;
+    double depth = 0.0;
+    Vec2 exit_pos = {game.portals[0].x + 0.5, game.portals[0].y + 0.5};
+    if (!generated_floor(game.portals[0].x, game.portals[0].y) ||
+        !project_sprite(&cam, exit_pos, 0.70, &screen_x, &sprite_h, &depth) ||
+        screen_x < SCREEN_W / 4 || screen_x > SCREEN_W * 3 / 4) {
+        fprintf(stderr, "error: dungeon exit is not visible from the crypt entrance\n");
+        return 0;
+    }
 
     game.ammo = 29;
     if (!setup_interaction_camera(&cam, game.portals[0].x, game.portals[0].y)) {
@@ -9782,7 +9848,7 @@ static int verify_forest_house_transition(void)
 
     int house_index = -1;
     for (int i = 0; i < MAX_HOUSES; ++i) {
-        if (game.houses[i].active) {
+        if (game.houses[i].active && !is_merchant_house_index(i)) {
             house_index = i;
             break;
         }
@@ -9808,6 +9874,11 @@ static int verify_forest_house_transition(void)
     interact_world(&game, &cam);
     if (!saved_forest.valid || game.generator_mode != GENERATOR_HOUSE || !game.in_dungeon || game.current_house_index != house_index || !game.portals[0].exit_to_forest) {
         fprintf(stderr, "error: house entrance did not create an interior level\n");
+        return 0;
+    }
+    if (!active_portal_prompt(&game, &cam) ||
+        map_at(game.portals[0].x, game.portals[0].y) != WALL_DOOR) {
+        fprintf(stderr, "error: house exit door is not visible and usable from the entrance\n");
         return 0;
     }
 
@@ -9871,6 +9942,68 @@ static int verify_forest_house_transition(void)
     }
 
     saved_forest.valid = 0;
+    return 1;
+}
+
+static int verify_merchant_shop(void)
+{
+    GameState game;
+    Camera cam;
+    saved_forest.valid = 0;
+    init_game_seed(&game, LEVEL_TEST_SEED + 616u, GENERATOR_FOREST);
+
+    if (!game.houses[0].active) {
+        fprintf(stderr, "error: forest merchant house was not generated\n");
+        return 0;
+    }
+
+    const House *house = &game.houses[0];
+    cam = (Camera){
+        .pos = {house_min_x(house) - 0.70, house->pos.y},
+        .dir = {1.0, 0.0},
+        .plane = {0.0, 0.66},
+    };
+    if (!active_merchant_house_prompt(&game, &cam)) {
+        fprintf(stderr, "error: merchant house is not interactable\n");
+        return 0;
+    }
+
+    interact_world(&game, &cam);
+    if (saved_forest.valid || game.generator_mode != GENERATOR_FOREST) {
+        fprintf(stderr, "error: merchant house entered an interior instead of using the shop screen\n");
+        return 0;
+    }
+
+    game.gold = SHOP_AMMO_PRICE + SHOP_HEALTH_PRICE;
+    game.ammo = 80;
+    game.player_health = 100;
+    if (!buy_merchant_shop_item(&game, SHOP_ITEM_AMMO) ||
+        game.gold != SHOP_HEALTH_PRICE ||
+        game.ammo != 98) {
+        fprintf(stderr, "error: merchant ammo purchase failed\n");
+        return 0;
+    }
+    if (!buy_merchant_shop_item(&game, SHOP_ITEM_HEALTH) ||
+        game.gold != 0 ||
+        game.player_health != 145) {
+        fprintf(stderr, "error: merchant health purchase failed\n");
+        return 0;
+    }
+    if (buy_merchant_shop_item(&game, SHOP_ITEM_AMMO) ||
+        game.gold != 0 ||
+        game.ammo != 98) {
+        fprintf(stderr, "error: merchant allowed a purchase without enough gold\n");
+        return 0;
+    }
+
+    game.gold = 999;
+    game.ammo = MAX_PISTOL_AMMO;
+    if (buy_merchant_shop_item(&game, SHOP_ITEM_AMMO) ||
+        game.gold != 999 ||
+        game.ammo != MAX_PISTOL_AMMO) {
+        fprintf(stderr, "error: merchant sold ammo past the ammo cap\n");
+        return 0;
+    }
     return 1;
 }
 
@@ -9999,6 +10132,16 @@ static int verify_relic_story_progress(void)
     }
     if (!relic_guardian) {
         fprintf(stderr, "error: relic dungeon did not spawn a nearby giant skeleton guardian\n");
+        return 0;
+    }
+    int screen_x = 0;
+    int sprite_h = 0;
+    double depth = 0.0;
+    Vec2 exit_pos = {game.portals[0].x + 0.5, game.portals[0].y + 0.5};
+    if (!generated_floor(game.portals[0].x, game.portals[0].y) ||
+        !project_sprite(&cam, exit_pos, 0.70, &screen_x, &sprite_h, &depth) ||
+        screen_x < SCREEN_W / 4 || screen_x > SCREEN_W * 3 / 4) {
+        fprintf(stderr, "error: relic dungeon exit is not visible from the crypt entrance\n");
         return 0;
     }
     cam.pos = game.items[relic_item].pos;
@@ -10620,6 +10763,9 @@ static int dump_frame_mode(const char *path, int mode)
     if (!verify_forest_house_transition()) {
         return 1;
     }
+    if (!verify_merchant_shop()) {
+        return 1;
+    }
     if (!verify_generated_dungeon_relic_reachability()) {
         return 1;
     }
@@ -10666,9 +10812,9 @@ static int dump_frame_mode(const char *path, int mode)
     init_game_seed(&game, LEVEL_TEST_SEED, mode);
     if (mode == GENERATOR_HOUSE) {
         cam = (Camera){
-            .pos = {9.20, 12.50},
-            .dir = {1.0, 0.0},
-            .plane = {0.0, 0.66},
+            .pos = {8.35, 12.50},
+            .dir = {-1.0, 0.0},
+            .plane = {0.0, -0.66},
         };
     }
     reveal_fog(&game, &cam);
@@ -10820,6 +10966,8 @@ typedef struct {
     int menu_open;
     int menu_page;
     int menu_selected;
+    int shop_open;
+    int shop_selected;
     int game_started;
     int fullscreen;
     int show_fps;
@@ -11210,6 +11358,29 @@ static void close_slot_menu(Runtime *rt)
     rt->menu_selected = previous_page == MENU_PAGE_LOAD ? MAIN_MENU_ITEM_LOAD : MAIN_MENU_ITEM_SAVE;
 }
 
+static void open_merchant_shop(Runtime *rt)
+{
+    rt->shop_open = 1;
+    rt->shop_selected = SHOP_ITEM_AMMO;
+    rt->paused = 1;
+}
+
+static void close_merchant_shop(Runtime *rt)
+{
+    rt->shop_open = 0;
+    rt->paused = 0;
+}
+
+static void activate_merchant_shop_item(Runtime *rt)
+{
+    if (rt->shop_selected == SHOP_ITEM_EXIT) {
+        close_merchant_shop(rt);
+        play_sfx(SFX_DOOR, 0.32);
+        return;
+    }
+    play_sfx(buy_merchant_shop_item(&rt->game, rt->shop_selected) ? SFX_PICKUP : SFX_LOCKED, 0.46);
+}
+
 static int parse_window_size(const char *text, int *out_w, int *out_h)
 {
     char *end = NULL;
@@ -11552,6 +11723,19 @@ static void runtime_frame(void *userdata)
             rt->running = 0;
         } else if (event.type == SDL_KEYDOWN) {
             SDL_Keycode key = event.key.keysym.sym;
+            if (rt->shop_open) {
+                if ((key == SDLK_w || key == SDLK_UP) && event.key.repeat == 0) {
+                    rt->shop_selected = (rt->shop_selected + SHOP_ITEM_COUNT - 1) % SHOP_ITEM_COUNT;
+                } else if ((key == SDLK_s || key == SDLK_DOWN) && event.key.repeat == 0) {
+                    rt->shop_selected = (rt->shop_selected + 1) % SHOP_ITEM_COUNT;
+                } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE) && event.key.repeat == 0) {
+                    activate_merchant_shop_item(rt);
+                } else if ((key == SDLK_ESCAPE || key == SDLK_e) && event.key.repeat == 0) {
+                    close_merchant_shop(rt);
+                    play_sfx(SFX_DOOR, 0.30);
+                }
+                continue;
+            }
             int help_closed = rt->menu_open ? 0 : close_help_on_key(&rt->game);
             if (rt->menu_open) {
                 int menu_count = menu_item_count_for_page(rt->menu_page);
@@ -11668,6 +11852,11 @@ static void runtime_frame(void *userdata)
                 if (!rt->paused) {
                     interact_world(&rt->game, &rt->cam);
                 }
+            } else if (key == SDLK_e && event.key.repeat == 0) {
+                if (!rt->paused && active_merchant_house_prompt(&rt->game, &rt->cam)) {
+                    open_merchant_shop(rt);
+                    play_sfx(SFX_DOOR, 0.36);
+                }
             } else if (key == SDLK_TAB && event.key.repeat == 0) {
                 rt->game.show_automap = !rt->game.show_automap;
             } else if (key == SDLK_h && event.key.repeat == 0) {
@@ -11773,6 +11962,8 @@ static void runtime_frame(void *userdata)
                          rt->sfx_volume,
                          rt->music_volume,
                          rt->fullscreen);
+    } else if (rt->shop_open) {
+        render_merchant_shop_screen(&rt->game, rt->shop_selected);
     } else if (rt->paused) {
         render_pause_overlay();
     }
