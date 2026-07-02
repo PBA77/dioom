@@ -52,7 +52,7 @@
 #define PROJECTILE_SIZE 32
 #define ITEM_SPRITE_COUNT 16
 #define WEAPON_SPRITE_SIZE 64
-#define WEAPON_SPRITE_COUNT 6
+#define WEAPON_SPRITE_COUNT 8
 #define MAX_PROJECTILES 20
 #define MAX_MONSTERS 10
 #define MAX_ITEMS 28
@@ -95,13 +95,26 @@
 #define MAX_FIREBALL_AMMO 24
 #define SHOP_AMMO_PRICE 20
 #define SHOP_HEALTH_PRICE 35
+#define SHOP_MAX_HP_PRICE 85
+#define SHOP_DAMAGE_PRICE 110
+#define SHOP_AMMO_CAP_PRICE 75
+#define SHOP_SHOTGUN_PRICE 95
 #define SHOP_AMMO_AMOUNT 18
 #define SHOP_HEALTH_AMOUNT 45
+#define MAX_HEALTH_UPGRADES 3
+#define HEALTH_UPGRADE_AMOUNT 20
+#define MAX_DAMAGE_UPGRADES 2
+#define MAX_AMMO_CAP_UPGRADES 3
+#define AMMO_CAP_UPGRADE_AMOUNT 18
 #define KNIFE_DAMAGE 3
 #define KNIFE_RANGE 1.35
 #define KNIFE_COOLDOWN_TIME 0.36
 #define PLAYER_DAMAGE 2
 #define SHOT_COOLDOWN_TIME 0.24
+#define SHOTGUN_DAMAGE 5
+#define SHOTGUN_RANGE 5.8
+#define SHOTGUN_COOLDOWN_TIME 0.62
+#define SHOTGUN_AMMO_COST 3
 #define FIREBALL_COOLDOWN_TIME 0.75
 #define WEAPON_FLASH_TIME 0.18
 #define FIREBALL_FLASH_TIME 0.26
@@ -142,7 +155,7 @@
 #define SAVEGAME_PATH_FORMAT "dioom_slot%d.sav"
 #define SAVEGAME_TMP_PATH_FORMAT "dioom_slot%d.sav.tmp"
 #define SAVEGAME_MAGIC 0x4D4F4944u
-#define SAVEGAME_VERSION 6u
+#define SAVEGAME_VERSION 7u
 #define MAX_SAMPLE_VOICES 16
 #define MAX_MIDI_VOICES 24
 #define MONSTER_FLYING_HEAD 4
@@ -169,6 +182,7 @@ enum {
     WEAPON_KNIFE = 0,
     WEAPON_PISTOL = 1,
     WEAPON_FIREBALL = 2,
+    WEAPON_SHOTGUN = 3,
 };
 
 enum {
@@ -223,6 +237,10 @@ enum {
 enum {
     SHOP_ITEM_AMMO = 0,
     SHOP_ITEM_HEALTH,
+    SHOP_ITEM_MAX_HP,
+    SHOP_ITEM_DAMAGE,
+    SHOP_ITEM_AMMO_CAP,
+    SHOP_ITEM_SHOTGUN,
     SHOP_ITEM_EXIT,
     SHOP_ITEM_COUNT
 };
@@ -234,6 +252,8 @@ enum {
     WEAPON_SPRITE_PISTOL_FLASH,
     WEAPON_SPRITE_FIREBALL,
     WEAPON_SPRITE_FIREBALL_CAST,
+    WEAPON_SPRITE_SHOTGUN,
+    WEAPON_SPRITE_SHOTGUN_FLASH,
 };
 
 enum {
@@ -481,6 +501,10 @@ typedef struct {
     int selected_weapon;
     int pistol_unlocked;
     int fireball_unlocked;
+    int shotgun_unlocked;
+    int max_health_upgrades;
+    int damage_upgrades;
+    int ammo_cap_upgrades;
     int gold;
     int kills;
     double shot_cooldown;
@@ -517,6 +541,30 @@ typedef struct {
     int show_help;
     unsigned char discovered[MAP_H][MAP_W];
 } GameState;
+
+static int player_max_health(const GameState *game)
+{
+    int upgrades = game ? game->max_health_upgrades : 0;
+    if (upgrades < 0) upgrades = 0;
+    if (upgrades > MAX_HEALTH_UPGRADES) upgrades = MAX_HEALTH_UPGRADES;
+    return PLAYER_MAX_HEALTH + upgrades * HEALTH_UPGRADE_AMOUNT;
+}
+
+static int pistol_ammo_cap(const GameState *game)
+{
+    int upgrades = game ? game->ammo_cap_upgrades : 0;
+    if (upgrades < 0) upgrades = 0;
+    if (upgrades > MAX_AMMO_CAP_UPGRADES) upgrades = MAX_AMMO_CAP_UPGRADES;
+    return MAX_PISTOL_AMMO + upgrades * AMMO_CAP_UPGRADE_AMOUNT;
+}
+
+static int weapon_damage_bonus(const GameState *game)
+{
+    int upgrades = game ? game->damage_upgrades : 0;
+    if (upgrades < 0) upgrades = 0;
+    if (upgrades > MAX_DAMAGE_UPGRADES) upgrades = MAX_DAMAGE_UPGRADES;
+    return upgrades;
+}
 
 typedef struct {
     int valid;
@@ -938,7 +986,7 @@ static double fog_amount_for_game(const GameState *game, double distance)
     if (!game || game->generator_mode != GENERATOR_FOREST) {
         return fog_amount(distance);
     }
-    return fog_amount_from_lut(distance, forest_fog_lut);
+    return clamp01(fog_amount_from_lut(distance, forest_fog_lut) + game->relic_count * 0.035);
 }
 
 static uint32_t apply_fog(uint32_t color, double distance, double strength)
@@ -4472,30 +4520,35 @@ static void draw_line(int x0, int y0, int x1, int y1, uint32_t color)
 
 static void render_shot_trace(const GameState *game)
 {
-    if (game->shot_trace <= 0.0 || game->selected_weapon != WEAPON_PISTOL) {
+    if (game->shot_trace <= 0.0 ||
+        (game->selected_weapon != WEAPON_PISTOL && game->selected_weapon != WEAPON_SHOTGUN)) {
         return;
     }
 
     double progress = 1.0 - clamp01(game->shot_trace / WEAPON_FLASH_TIME);
     int muzzle_x = SCREEN_W / 2 + 31;
     int muzzle_y = SCREEN_H - 66;
-    int target_x = SCREEN_W / 2;
-    int target_y = SCREEN_H / 2 + 2;
-    int bullet_x = muzzle_x + (int)((target_x - muzzle_x) * progress);
-    int bullet_y = muzzle_y + (int)((target_y - muzzle_y) * progress);
-    int tail_x = bullet_x + (int)((muzzle_x - target_x) * 0.08);
-    int tail_y = bullet_y + (int)((muzzle_y - target_y) * 0.08);
+    int pellet_count = game->selected_weapon == WEAPON_SHOTGUN ? 3 : 1;
     uint32_t core = mix_color(rgb(255, 132, 34), rgb(255, 244, 154), 0.70 + 0.30 * (1.0 - progress));
 
-    draw_line(tail_x, tail_y, bullet_x, bullet_y, rgb(198, 88, 28));
-    draw_line(tail_x + 1, tail_y, bullet_x + 1, bullet_y, core);
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            int px = bullet_x + x;
-            int py = bullet_y + y;
-            if (px >= 0 && px < SCREEN_W && py >= 0 && py < SCREEN_H) {
-                framebuffer[py * SCREEN_W + px] = x == 0 && y == 0 ? rgb(255, 250, 194) : core;
-                add_glow(px, py, 0.28);
+    for (int pellet = 0; pellet < pellet_count; ++pellet) {
+        int spread = pellet_count == 1 ? 0 : (pellet - 1) * 28;
+        int target_x = SCREEN_W / 2 + spread;
+        int target_y = SCREEN_H / 2 + 2 + abs(spread) / 5;
+        int bullet_x = muzzle_x + (int)((target_x - muzzle_x) * progress);
+        int bullet_y = muzzle_y + (int)((target_y - muzzle_y) * progress);
+        int tail_x = bullet_x + (int)((muzzle_x - target_x) * 0.08);
+        int tail_y = bullet_y + (int)((muzzle_y - target_y) * 0.08);
+        draw_line(tail_x, tail_y, bullet_x, bullet_y, rgb(198, 88, 28));
+        draw_line(tail_x + 1, tail_y, bullet_x + 1, bullet_y, core);
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                int px = bullet_x + x;
+                int py = bullet_y + y;
+                if (px >= 0 && px < SCREEN_W && py >= 0 && py < SCREEN_H) {
+                    framebuffer[py * SCREEN_W + px] = x == 0 && y == 0 ? rgb(255, 250, 194) : core;
+                    add_glow(px, py, 0.28);
+                }
             }
         }
     }
@@ -4547,6 +4600,10 @@ static void render_weapon(const GameState *game)
         sprite = game->weapon_flash > 0.0 ? WEAPON_SPRITE_FIREBALL_CAST : WEAPON_SPRITE_FIREBALL;
         size = 96;
         offset_y = 2;
+    } else if (game->selected_weapon == WEAPON_SHOTGUN) {
+        sprite = game->weapon_flash > 0.0 ? WEAPON_SPRITE_SHOTGUN_FLASH : WEAPON_SPRITE_SHOTGUN;
+        size = 92;
+        offset_y = 7;
     } else {
         sprite = game->weapon_flash > 0.0 ? WEAPON_SPRITE_PISTOL_FLASH : WEAPON_SPRITE_PISTOL;
         size = 86;
@@ -4562,7 +4619,8 @@ static void render_hud(const GameState *game)
     fill_rect(0, SCREEN_H - 14, SCREEN_W, 14, rgb(20, 20, 22));
 
     fill_rect(6, SCREEN_H - 10, 74, 6, rgb(70, 18, 18));
-    int hp_w = game->player_health * 74 / PLAYER_MAX_HEALTH;
+    int hp_w = game->player_health * 74 / player_max_health(game);
+    if (hp_w > 74) hp_w = 74;
     fill_rect(6, SCREEN_H - 10, hp_w, 6, game->player_health > 30 ? rgb(32, 174, 64) : rgb(210, 42, 32));
 
     int ammo_pips = game->ammo > 18 ? 18 : game->ammo;
@@ -4573,27 +4631,31 @@ static void render_hud(const GameState *game)
     uint32_t knife_slot = game->selected_weapon == WEAPON_KNIFE ? rgb(210, 180, 90) : rgb(62, 58, 48);
     uint32_t pistol_slot = game->selected_weapon == WEAPON_PISTOL ? rgb(210, 180, 90) : rgb(62, 58, 48);
     uint32_t fire_slot = game->selected_weapon == WEAPON_FIREBALL ? rgb(230, 94, 32) : rgb(64, 42, 32);
+    uint32_t shotgun_slot = game->selected_weapon == WEAPON_SHOTGUN ? rgb(210, 180, 90) : rgb(62, 58, 48);
     fill_rect(180, SCREEN_H - 12, 12, 10, knife_slot);
     draw_line(190, SCREEN_H - 11, 183, SCREEN_H - 4, rgb(210, 210, 188));
     fill_rect(194, SCREEN_H - 12, 12, 10, game->pistol_unlocked ? pistol_slot : rgb(34, 30, 28));
     fill_rect(197, SCREEN_H - 9, 6, 4, game->pistol_unlocked ? rgb(24, 24, 24) : rgb(18, 18, 18));
-    fill_rect(208, SCREEN_H - 12, 12, 10, game->fireball_unlocked ? fire_slot : rgb(34, 30, 28));
-    fill_rect(211, SCREEN_H - 9, 6, 4, game->fireball_unlocked ? rgb(255, 162, 54) : rgb(18, 18, 18));
+    fill_rect(208, SCREEN_H - 12, 12, 10, game->shotgun_unlocked ? shotgun_slot : rgb(34, 30, 28));
+    fill_rect(211, SCREEN_H - 10, 6, 2, game->shotgun_unlocked ? rgb(34, 34, 34) : rgb(18, 18, 18));
+    fill_rect(211, SCREEN_H - 6, 6, 2, game->shotgun_unlocked ? rgb(34, 34, 34) : rgb(18, 18, 18));
+    fill_rect(222, SCREEN_H - 12, 12, 10, game->fireball_unlocked ? fire_slot : rgb(34, 30, 28));
+    fill_rect(225, SCREEN_H - 9, 6, 4, game->fireball_unlocked ? rgb(255, 162, 54) : rgb(18, 18, 18));
     int fire_pips = game->fireball_ammo > 10 ? 10 : game->fireball_ammo;
     for (int i = 0; i < fire_pips; ++i) {
-        fill_rect(224 + i * 3, SCREEN_H - 10, 2, 6, rgb(232, 92, 28));
+        fill_rect(238 + i * 3, SCREEN_H - 10, 2, 6, rgb(232, 92, 28));
     }
     if (game->gold > 0) {
-        fill_rect(238, SCREEN_H - 5, 10, 2, rgb(104, 68, 20));
+        fill_rect(252, SCREEN_H - 5, 10, 2, rgb(104, 68, 20));
         int gold_pips = game->gold / 10;
         if (gold_pips < 1) gold_pips = 1;
         if (gold_pips > 6) gold_pips = 6;
         for (int i = 0; i < gold_pips; ++i) {
-            fill_rect(238 + i * 2, SCREEN_H - 8 - (i & 1), 2, 2, rgb(238, 178, 54));
+            fill_rect(252 + i * 2, SCREEN_H - 8 - (i & 1), 2, 2, rgb(238, 178, 54));
         }
     }
     for (int i = 0; i < RELIC_COUNT; ++i) {
-        int x = 258 + i * 7;
+        int x = 272 + i * 7;
         int collected = (game->relic_mask & (1 << i)) != 0;
         uint32_t frame = collected ? rgb(170, 104, 192) : rgb(54, 44, 60);
         uint32_t core = collected ? rgb(240, 218, 150) : rgb(26, 24, 30);
@@ -7267,6 +7329,51 @@ static void place_generated_wall_decals(GameState *game, LevelRng *rng)
     }
 }
 
+static void apply_forest_relic_escalation(GameState *game)
+{
+    if (!game || game->generator_mode != GENERATOR_FOREST || game->relic_count <= 0) {
+        return;
+    }
+
+    int escalation = game->relic_count;
+    for (int i = 0; i < game->monster_count; ++i) {
+        Monster *monster = &game->monsters[i];
+        if (!monster->active) {
+            continue;
+        }
+        int min_hp = scale_monster_hp_for_difficulty(monster_max_hp(monster->type), game->difficulty) + escalation * 2;
+        if (monster->hp < min_hp) {
+            monster->hp = min_hp;
+        }
+        monster->shoot_timer *= 0.92;
+    }
+
+    LevelRng rng = {LEVEL_TEST_SEED ^ (uint32_t)(game->relic_count * 977u + game->kills * 31u)};
+    int to_spawn = escalation + (escalation >= 3 ? 1 : 0);
+    for (int i = 0; i < game->monster_count && to_spawn > 0; ++i) {
+        Monster *monster = &game->monsters[i];
+        if (monster->active) {
+            continue;
+        }
+        memset(monster, 0, sizeof(*monster));
+        monster->active = 1;
+        monster->pos = pick_floor_spot(&rng, game, 42.0);
+        monster->type = escalation >= 3 && (to_spawn & 1) ? MONSTER_FLYING_HEAD : 3;
+        monster->hp = scale_monster_hp_for_difficulty(monster_max_hp(monster->type), game->difficulty) + escalation * 2;
+        monster->shoot_timer = 0.35 + to_spawn * 0.19;
+        monster->target_waypoint = 1;
+        monster->route = i;
+        monster->facing = (Vec2){0.0, -1.0};
+        monster->last_seen = monster->pos;
+        monster->patrol[0] = monster->pos;
+        monster->patrol[1] = pick_floor_spot(&rng, game, 30.0);
+        monster->patrol_count = 2;
+        monster->strafe_timer = 0.35 + i * 0.07;
+        monster->strafe_dir = (i & 1) ? 1 : -1;
+        to_spawn--;
+    }
+}
+
 static void place_generated_monsters(GameState *game, LevelRng *rng, int boss_room, LevelRoom room)
 {
     game->monster_count = MAX_MONSTERS;
@@ -7284,6 +7391,9 @@ static void place_generated_monsters(GameState *game, LevelRng *rng, int boss_ro
         monster->route = i;
         monster->type = monster_types[i];
         monster->hp = scale_monster_hp_for_difficulty(monster_max_hp(monster->type), game->difficulty);
+        if (game->generator_mode == GENERATOR_FOREST && game->relic_count > 0) {
+            monster->hp += game->relic_count * 2;
+        }
         monster->facing = (Vec2){0.0, -1.0};
         monster->ai_state = 0;
         monster->last_seen = monster->pos;
@@ -7446,6 +7556,7 @@ static void generate_level(GameState *game, uint32_t seed, int mode)
     place_generated_decals(game, &rng);
     place_generated_wall_decals(game, &rng);
     place_generated_monsters(game, &rng, mode == GENERATOR_BOSS, boss_room);
+    apply_forest_relic_escalation(game);
 }
 
 static void init_game_seed(GameState *game, uint32_t seed, int mode)
@@ -7481,6 +7592,9 @@ static void init_game_seed(GameState *game, uint32_t seed, int mode)
     generate_level(game, seed, mode);
     if (game->trainer) {
         game->relic_mask = RELIC_MASK_ALL;
+        game->shotgun_unlocked = 1;
+        game->pistol_unlocked = 1;
+        game->fireball_unlocked = 1;
         sync_relic_progress(game);
     }
     set_active_music_track(mode == GENERATOR_FOREST ? MUSIC_TRACK_FOREST :
@@ -7997,14 +8111,14 @@ static void pickup_item(GameState *game, Item *item)
     switch (item->type) {
     case ITEM_HEALTH:
         game->player_health += 45;
-        if (game->player_health > PLAYER_MAX_HEALTH) {
-            game->player_health = PLAYER_MAX_HEALTH;
+        if (game->player_health > player_max_health(game)) {
+            game->player_health = player_max_health(game);
         }
         break;
     case ITEM_AMMO:
         game->ammo += 18;
-        if (game->ammo > MAX_PISTOL_AMMO) {
-            game->ammo = MAX_PISTOL_AMMO;
+        if (game->ammo > pistol_ammo_cap(game)) {
+            game->ammo = pistol_ammo_cap(game);
         }
         break;
     case ITEM_RAPID:
@@ -8025,8 +8139,8 @@ static void pickup_item(GameState *game, Item *item)
         game->pistol_unlocked = 1;
         game->selected_weapon = WEAPON_PISTOL;
         game->ammo += 12;
-        if (game->ammo > MAX_PISTOL_AMMO) {
-            game->ammo = MAX_PISTOL_AMMO;
+        if (game->ammo > pistol_ammo_cap(game)) {
+            game->ammo = pistol_ammo_cap(game);
         }
         break;
     case ITEM_GOLD:
@@ -8038,8 +8152,8 @@ static void pickup_item(GameState *game, Item *item)
     case ITEM_SHRINE:
         if (item->relic_index == 0) {
             game->player_health += 70;
-            if (game->player_health > PLAYER_MAX_HEALTH) {
-                game->player_health = PLAYER_MAX_HEALTH;
+            if (game->player_health > player_max_health(game)) {
+                game->player_health = player_max_health(game);
             }
         } else if (item->relic_index == 1) {
             game->damage_timer = 18.0;
@@ -8109,7 +8223,39 @@ static void select_weapon(GameState *game, int weapon)
     if (weapon == WEAPON_FIREBALL && !game->fireball_unlocked) {
         return;
     }
+    if (weapon == WEAPON_SHOTGUN && !game->shotgun_unlocked) {
+        return;
+    }
     game->selected_weapon = weapon;
+}
+
+static int weapon_available(const GameState *game, int weapon)
+{
+    if (weapon == WEAPON_KNIFE) return 1;
+    if (weapon == WEAPON_PISTOL) return game->pistol_unlocked;
+    if (weapon == WEAPON_FIREBALL) return game->fireball_unlocked;
+    if (weapon == WEAPON_SHOTGUN) return game->shotgun_unlocked;
+    return 0;
+}
+
+static void cycle_weapon(GameState *game, int dir)
+{
+    static const int order[] = {WEAPON_KNIFE, WEAPON_PISTOL, WEAPON_SHOTGUN, WEAPON_FIREBALL};
+    int count = (int)(sizeof(order) / sizeof(order[0]));
+    int current = 0;
+    for (int i = 0; i < count; ++i) {
+        if (order[i] == game->selected_weapon) {
+            current = i;
+            break;
+        }
+    }
+    for (int step = 1; step <= count; ++step) {
+        int next = (current + dir * step + count * 4) % count;
+        if (weapon_available(game, order[next])) {
+            game->selected_weapon = order[next];
+            return;
+        }
+    }
 }
 
 static int portal_matches(const Portal *portal, int tx, int ty, int px, int py)
@@ -8433,6 +8579,10 @@ static const char *merchant_shop_item_name(int item)
     switch (item) {
     case SHOP_ITEM_AMMO: return "AMUNICJA";
     case SHOP_ITEM_HEALTH: return "APTECZKA";
+    case SHOP_ITEM_MAX_HP: return "MAX HP";
+    case SHOP_ITEM_DAMAGE: return "OBRAZENIA";
+    case SHOP_ITEM_AMMO_CAP: return "LADOWNICA";
+    case SHOP_ITEM_SHOTGUN: return "SHOTGUN";
     case SHOP_ITEM_EXIT: return "WYJDZ";
     default: return "";
     }
@@ -8443,6 +8593,23 @@ static int merchant_shop_item_price(int item)
     switch (item) {
     case SHOP_ITEM_AMMO: return SHOP_AMMO_PRICE;
     case SHOP_ITEM_HEALTH: return SHOP_HEALTH_PRICE;
+    case SHOP_ITEM_MAX_HP: return SHOP_MAX_HP_PRICE;
+    case SHOP_ITEM_DAMAGE: return SHOP_DAMAGE_PRICE;
+    case SHOP_ITEM_AMMO_CAP: return SHOP_AMMO_CAP_PRICE;
+    case SHOP_ITEM_SHOTGUN: return SHOP_SHOTGUN_PRICE;
+    default: return 0;
+    }
+}
+
+static int merchant_shop_item_full(const GameState *game, int item)
+{
+    switch (item) {
+    case SHOP_ITEM_AMMO: return game->ammo >= pistol_ammo_cap(game);
+    case SHOP_ITEM_HEALTH: return game->player_health >= player_max_health(game);
+    case SHOP_ITEM_MAX_HP: return game->max_health_upgrades >= MAX_HEALTH_UPGRADES;
+    case SHOP_ITEM_DAMAGE: return game->damage_upgrades >= MAX_DAMAGE_UPGRADES;
+    case SHOP_ITEM_AMMO_CAP: return game->ammo_cap_upgrades >= MAX_AMMO_CAP_UPGRADES;
+    case SHOP_ITEM_SHOTGUN: return game->shotgun_unlocked;
     default: return 0;
     }
 }
@@ -8458,8 +8625,7 @@ static void render_merchant_shop_row(const GameState *game, int item, int select
     } else {
         int price = merchant_shop_item_price(item);
         disabled = !can_buy_merchant_shop_item(game, item);
-        if ((item == SHOP_ITEM_AMMO && game->ammo >= MAX_PISTOL_AMMO) ||
-            (item == SHOP_ITEM_HEALTH && game->player_health >= PLAYER_MAX_HEALTH)) {
+        if (merchant_shop_item_full(game, item)) {
             snprintf(line, sizeof(line), "%s  PELNE", merchant_shop_item_name(item));
         } else {
             snprintf(line, sizeof(line), "%s  %d ZL", merchant_shop_item_name(item), price);
@@ -8486,9 +8652,9 @@ static void render_merchant_shop_screen(const GameState *game, int selected)
     char ammo_text[32];
     char health_text[32];
     int x = SCREEN_W / 2 - 158;
-    int y = SCREEN_H / 2 - 142;
+    int y = SCREEN_H / 2 - 184;
     int w = 316;
-    int h = 264;
+    int h = 348;
 
     blend_rect(0, 0, SCREEN_W, SCREEN_H, rgb(0, 0, 0), 0.64);
     fill_rect(x, y, w, h, rgb(12, 9, 7));
@@ -8499,15 +8665,15 @@ static void render_merchant_shop_screen(const GameState *game, int selected)
 
     render_centered_prompt_line(y + 17, "HANDLARZ", rgb(246, 224, 158));
     snprintf(gold_text, sizeof(gold_text), "ZLOTO %d", game->gold);
-    snprintf(ammo_text, sizeof(ammo_text), "AMMO %d", game->ammo);
-    snprintf(health_text, sizeof(health_text), "HP %d", game->player_health);
+    snprintf(ammo_text, sizeof(ammo_text), "AMMO %d/%d", game->ammo, pistol_ammo_cap(game));
+    snprintf(health_text, sizeof(health_text), "HP %d/%d", game->player_health, player_max_health(game));
     draw_prompt_text(x + 28, y + 62, gold_text, rgb(238, 178, 54));
     draw_prompt_text(x + 28, y + 82, ammo_text, rgb(206, 190, 150));
-    draw_prompt_text(x + 178, y + 82, health_text, rgb(206, 190, 150));
+    draw_prompt_text(x + 168, y + 82, health_text, rgb(206, 190, 150));
 
-    render_merchant_shop_row(game, SHOP_ITEM_AMMO, selected == SHOP_ITEM_AMMO, y + 118);
-    render_merchant_shop_row(game, SHOP_ITEM_HEALTH, selected == SHOP_ITEM_HEALTH, y + 150);
-    render_merchant_shop_row(game, SHOP_ITEM_EXIT, selected == SHOP_ITEM_EXIT, y + 194);
+    for (int item = 0; item < SHOP_ITEM_COUNT; ++item) {
+        render_merchant_shop_row(game, item, selected == item, y + 114 + item * 30);
+    }
     render_centered_prompt_line(y + h - 28, "ENTER KUP  ESC WYJDZ", rgb(142, 126, 94));
 }
 
@@ -8853,6 +9019,10 @@ static void copy_player_progress(GameState *dst, const GameState *src)
     dst->selected_weapon = src->selected_weapon;
     dst->pistol_unlocked = src->pistol_unlocked;
     dst->fireball_unlocked = src->fireball_unlocked;
+    dst->shotgun_unlocked = src->shotgun_unlocked;
+    dst->max_health_upgrades = src->max_health_upgrades;
+    dst->damage_upgrades = src->damage_upgrades;
+    dst->ammo_cap_upgrades = src->ammo_cap_upgrades;
     dst->gold = src->gold;
     dst->rapid_timer = src->rapid_timer;
     dst->damage_timer = src->damage_timer;
@@ -8949,6 +9119,7 @@ static void return_to_saved_forest(GameState *game, Camera *cam)
     memcpy(torches, saved_forest.torches, sizeof(torches));
     active_game = game;
     sync_relic_progress(game);
+    apply_forest_relic_escalation(game);
     reveal_fog(game, cam);
     saved_forest.valid = 0;
     set_active_music_track(MUSIC_TRACK_FOREST);
@@ -8992,10 +9163,22 @@ static int can_buy_merchant_shop_item(const GameState *game, int item)
         return 0;
     }
     if (item == SHOP_ITEM_AMMO) {
-        return game->gold >= SHOP_AMMO_PRICE && game->ammo < MAX_PISTOL_AMMO;
+        return game->gold >= SHOP_AMMO_PRICE && game->ammo < pistol_ammo_cap(game);
     }
     if (item == SHOP_ITEM_HEALTH) {
-        return game->gold >= SHOP_HEALTH_PRICE && game->player_health < PLAYER_MAX_HEALTH;
+        return game->gold >= SHOP_HEALTH_PRICE && game->player_health < player_max_health(game);
+    }
+    if (item == SHOP_ITEM_MAX_HP) {
+        return game->gold >= SHOP_MAX_HP_PRICE && game->max_health_upgrades < MAX_HEALTH_UPGRADES;
+    }
+    if (item == SHOP_ITEM_DAMAGE) {
+        return game->gold >= SHOP_DAMAGE_PRICE && game->damage_upgrades < MAX_DAMAGE_UPGRADES;
+    }
+    if (item == SHOP_ITEM_AMMO_CAP) {
+        return game->gold >= SHOP_AMMO_CAP_PRICE && game->ammo_cap_upgrades < MAX_AMMO_CAP_UPGRADES;
+    }
+    if (item == SHOP_ITEM_SHOTGUN) {
+        return game->gold >= SHOP_SHOTGUN_PRICE && !game->shotgun_unlocked;
     }
     return 0;
 }
@@ -9008,8 +9191,8 @@ static int buy_merchant_shop_item(GameState *game, int item)
     if (item == SHOP_ITEM_AMMO) {
         game->gold -= SHOP_AMMO_PRICE;
         game->ammo += SHOP_AMMO_AMOUNT;
-        if (game->ammo > MAX_PISTOL_AMMO) {
-            game->ammo = MAX_PISTOL_AMMO;
+        if (game->ammo > pistol_ammo_cap(game)) {
+            game->ammo = pistol_ammo_cap(game);
         }
         game->pickup_flash = 0.22;
         return 1;
@@ -9017,8 +9200,44 @@ static int buy_merchant_shop_item(GameState *game, int item)
     if (item == SHOP_ITEM_HEALTH) {
         game->gold -= SHOP_HEALTH_PRICE;
         game->player_health += SHOP_HEALTH_AMOUNT;
-        if (game->player_health > PLAYER_MAX_HEALTH) {
-            game->player_health = PLAYER_MAX_HEALTH;
+        if (game->player_health > player_max_health(game)) {
+            game->player_health = player_max_health(game);
+        }
+        game->pickup_flash = 0.22;
+        return 1;
+    }
+    if (item == SHOP_ITEM_MAX_HP) {
+        game->gold -= SHOP_MAX_HP_PRICE;
+        game->max_health_upgrades += 1;
+        game->player_health += HEALTH_UPGRADE_AMOUNT;
+        if (game->player_health > player_max_health(game)) {
+            game->player_health = player_max_health(game);
+        }
+        game->pickup_flash = 0.22;
+        return 1;
+    }
+    if (item == SHOP_ITEM_DAMAGE) {
+        game->gold -= SHOP_DAMAGE_PRICE;
+        game->damage_upgrades += 1;
+        game->pickup_flash = 0.22;
+        return 1;
+    }
+    if (item == SHOP_ITEM_AMMO_CAP) {
+        game->gold -= SHOP_AMMO_CAP_PRICE;
+        game->ammo_cap_upgrades += 1;
+        game->ammo += AMMO_CAP_UPGRADE_AMOUNT;
+        if (game->ammo > pistol_ammo_cap(game)) {
+            game->ammo = pistol_ammo_cap(game);
+        }
+        game->pickup_flash = 0.22;
+        return 1;
+    }
+    if (item == SHOP_ITEM_SHOTGUN) {
+        game->gold -= SHOP_SHOTGUN_PRICE;
+        game->shotgun_unlocked = 1;
+        game->selected_weapon = WEAPON_SHOTGUN;
+        if (game->ammo < SHOTGUN_AMMO_COST * 2) {
+            game->ammo = SHOTGUN_AMMO_COST * 2;
         }
         game->pickup_flash = 0.22;
         return 1;
@@ -9156,8 +9375,62 @@ static void player_fire(GameState *game, const Camera *cam)
 
         if (best >= 0) {
             Monster *monster = &game->monsters[best];
-            int damage = KNIFE_DAMAGE + (game->damage_timer > 0.0 ? 2 : 0);
+            int damage = KNIFE_DAMAGE + weapon_damage_bonus(game) + (game->damage_timer > 0.0 ? 2 : 0);
             damage_monster(game, monster, damage, cam->pos);
+        }
+        return;
+    }
+
+    if (game->selected_weapon == WEAPON_SHOTGUN) {
+        if (!game->shotgun_unlocked) {
+            return;
+        }
+        if (!game->trainer && game->ammo < SHOTGUN_AMMO_COST) {
+            return;
+        }
+
+        if (!game->trainer) {
+            game->ammo -= SHOTGUN_AMMO_COST;
+        }
+        play_sfx(SFX_PISTOL, 0.68);
+        game->shot_cooldown = game->rapid_timer > 0.0 ? SHOTGUN_COOLDOWN_TIME * 0.55 : SHOTGUN_COOLDOWN_TIME;
+        game->weapon_flash = WEAPON_FLASH_TIME;
+        game->muzzle_light = MUZZLE_LIGHT_TIME * 1.25;
+        game->shot_trace = WEAPON_FLASH_TIME;
+
+        int hits = 0;
+        for (int i = 0; i < game->monster_count; ++i) {
+            Monster *monster = &game->monsters[i];
+            if (!monster->active) {
+                continue;
+            }
+
+            int screen_x;
+            int sprite_h;
+            double depth;
+            if (!project_sprite(cam, monster->pos, 1.0, &screen_x, &sprite_h, &depth)) {
+                continue;
+            }
+            if (depth > SHOTGUN_RANGE) {
+                continue;
+            }
+
+            int aim_window = sprite_h / 2 + 18;
+            if (aim_window < 34) aim_window = 34;
+            if (abs(screen_x - SCREEN_W / 2) > aim_window) {
+                continue;
+            }
+            if (!has_line_of_sight(cam->pos, monster->pos)) {
+                continue;
+            }
+
+            int damage = SHOTGUN_DAMAGE + (depth < 2.6 ? 2 : 0) + (game->damage_timer > 0.0 ? 2 : 0);
+            damage_monster(game, monster, damage, cam->pos);
+            monster->hit_rim_timer = HIT_RIM_TIME;
+            hits++;
+        }
+        if (hits > 0) {
+            game->hit_marker = HIT_MARKER_TIME;
         }
         return;
     }
@@ -9209,7 +9482,7 @@ static void player_fire(GameState *game, const Camera *cam)
 
     if (best >= 0) {
         Monster *monster = &game->monsters[best];
-        int damage = PLAYER_DAMAGE + (game->damage_timer > 0.0 ? 2 : 0);
+        int damage = PLAYER_DAMAGE + weapon_damage_bonus(game) + (game->damage_timer > 0.0 ? 2 : 0);
         damage_monster(game, monster, damage, cam->pos);
         monster->hit_rim_timer = HIT_RIM_TIME;
         game->hit_marker = HIT_MARKER_TIME;
@@ -9476,6 +9749,11 @@ static int verify_player_weapon(void)
         fprintf(stderr, "error: locked pistol weapon was selected\n");
         return 0;
     }
+    select_weapon(&game, WEAPON_SHOTGUN);
+    if (game.selected_weapon != WEAPON_KNIFE) {
+        fprintf(stderr, "error: locked shotgun weapon was selected\n");
+        return 0;
+    }
 
     game.monster_count = 1;
     memset(game.monsters, 0, sizeof(game.monsters));
@@ -9543,6 +9821,39 @@ static int verify_player_weapon(void)
     player_fire(&game, &cam);
     if (game.ammo != ammo_before_pistol - 2 || game.monsters[0].active || game.kills != 1) {
         fprintf(stderr, "error: pistol weapon failed kill verification\n");
+        return 0;
+    }
+
+    game.shotgun_unlocked = 1;
+    game.selected_weapon = WEAPON_SHOTGUN;
+    game.ammo = SHOTGUN_AMMO_COST * 2;
+    game.kills = 0;
+    game.shot_cooldown = 0.0;
+    game.monster_count = 2;
+    memset(game.monsters, 0, sizeof(game.monsters));
+    game.monsters[0] = (Monster){
+        .active = 1,
+        .hp = 8,
+        .pos = {4.5, 22.22},
+        .type = 1,
+        .facing = {-1.0, 0.0},
+        .patrol_count = 1,
+        .patrol = {{4.5, 22.22}},
+    };
+    game.monsters[1] = (Monster){
+        .active = 1,
+        .hp = 8,
+        .pos = {4.5, 22.78},
+        .type = 1,
+        .facing = {-1.0, 0.0},
+        .patrol_count = 1,
+        .patrol = {{4.5, 22.78}},
+    };
+    player_fire(&game, &cam);
+    if (game.ammo != SHOTGUN_AMMO_COST ||
+        (game.monsters[0].hp >= 8 && game.monsters[1].hp >= 8) ||
+        game.hit_marker <= 0.0) {
+        fprintf(stderr, "error: shotgun spread verification failed\n");
         return 0;
     }
 
@@ -10264,12 +10575,17 @@ static int verify_forest_dungeon_transition(void)
     game.pistol_unlocked = 1;
     game.selected_weapon = WEAPON_PISTOL;
     game.ammo = 37;
+    game.shotgun_unlocked = 1;
+    game.max_health_upgrades = 1;
+    game.damage_upgrades = 1;
+    game.ammo_cap_upgrades = 1;
     interact_world(&game, &cam);
     if (!saved_forest.valid || !game.in_dungeon || game.generator_mode == GENERATOR_FOREST || !game.portals[0].exit_to_forest) {
         fprintf(stderr, "error: forest entrance did not create a dungeon with an exit\n");
         return 0;
     }
-    if (!game.pistol_unlocked || game.selected_weapon != WEAPON_PISTOL || game.ammo != 37) {
+    if (!game.pistol_unlocked || !game.shotgun_unlocked || game.selected_weapon != WEAPON_PISTOL ||
+        game.ammo != 37 || game.max_health_upgrades != 1 || game.damage_upgrades != 1 || game.ammo_cap_upgrades != 1) {
         fprintf(stderr, "error: dungeon entry did not preserve player weapon state\n");
         return 0;
     }
@@ -10296,7 +10612,8 @@ static int verify_forest_dungeon_transition(void)
         fprintf(stderr, "error: dungeon exit did not restore the forest state and position\n");
         return 0;
     }
-    if (!game.pistol_unlocked || game.selected_weapon != WEAPON_PISTOL || game.ammo != 29) {
+    if (!game.pistol_unlocked || !game.shotgun_unlocked || game.selected_weapon != WEAPON_PISTOL ||
+        game.ammo != 29 || game.max_health_upgrades != 1 || game.damage_upgrades != 1 || game.ammo_cap_upgrades != 1) {
         fprintf(stderr, "error: dungeon exit did not preserve player weapon progress\n");
         return 0;
     }
@@ -10482,11 +10799,41 @@ static int verify_merchant_shop(void)
     }
 
     game.gold = 999;
-    game.ammo = MAX_PISTOL_AMMO;
+    game.ammo = pistol_ammo_cap(&game);
     if (buy_merchant_shop_item(&game, SHOP_ITEM_AMMO) ||
         game.gold != 999 ||
-        game.ammo != MAX_PISTOL_AMMO) {
+        game.ammo != pistol_ammo_cap(&game)) {
         fprintf(stderr, "error: merchant sold ammo past the ammo cap\n");
+        return 0;
+    }
+    if (!buy_merchant_shop_item(&game, SHOP_ITEM_MAX_HP) ||
+        game.max_health_upgrades != 1 ||
+        player_max_health(&game) != PLAYER_MAX_HEALTH + HEALTH_UPGRADE_AMOUNT ||
+        game.player_health != 165) {
+        fprintf(stderr, "error: merchant max health upgrade failed\n");
+        return 0;
+    }
+    if (!buy_merchant_shop_item(&game, SHOP_ITEM_DAMAGE) ||
+        game.damage_upgrades != 1 ||
+        weapon_damage_bonus(&game) != 1) {
+        fprintf(stderr, "error: merchant damage upgrade failed\n");
+        return 0;
+    }
+    if (!buy_merchant_shop_item(&game, SHOP_ITEM_AMMO_CAP) ||
+        game.ammo_cap_upgrades != 1 ||
+        pistol_ammo_cap(&game) != MAX_PISTOL_AMMO + AMMO_CAP_UPGRADE_AMOUNT ||
+        game.ammo != pistol_ammo_cap(&game)) {
+        fprintf(stderr, "error: merchant ammo cap upgrade failed\n");
+        return 0;
+    }
+    if (!buy_merchant_shop_item(&game, SHOP_ITEM_SHOTGUN) ||
+        !game.shotgun_unlocked ||
+        game.selected_weapon != WEAPON_SHOTGUN) {
+        fprintf(stderr, "error: merchant shotgun purchase failed\n");
+        return 0;
+    }
+    if (buy_merchant_shop_item(&game, SHOP_ITEM_SHOTGUN)) {
+        fprintf(stderr, "error: merchant sold shotgun twice\n");
         return 0;
     }
     return 1;
@@ -12516,6 +12863,10 @@ static void runtime_frame(void *userdata)
         } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
             if (!rt->paused && !rt->menu_open && !rt->shop_open) {
                 player_fire(&rt->game, &rt->cam);
+            }
+        } else if (event.type == SDL_MOUSEWHEEL) {
+            if (!rt->paused && !rt->menu_open && !rt->shop_open && rt->game_started) {
+                cycle_weapon(&rt->game, event.wheel.y > 0 ? -1 : 1);
             }
         }
     }
