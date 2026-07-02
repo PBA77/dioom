@@ -105,6 +105,9 @@
 #define FIREBALL_COOLDOWN_TIME 0.75
 #define WEAPON_FLASH_TIME 0.18
 #define FIREBALL_FLASH_TIME 0.26
+#define MUZZLE_LIGHT_TIME 0.075
+#define HIT_MARKER_TIME 0.16
+#define HIT_RIM_TIME 0.14
 #define FIREBALL_DIRECT_DAMAGE 5
 #define FIREBALL_SPLASH_DAMAGE 4
 #define FIREBALL_RADIUS 1.25
@@ -135,7 +138,7 @@
 #define SAVEGAME_PATH_FORMAT "dioom_slot%d.sav"
 #define SAVEGAME_TMP_PATH_FORMAT "dioom_slot%d.sav.tmp"
 #define SAVEGAME_MAGIC 0x4D4F4944u
-#define SAVEGAME_VERSION 4u
+#define SAVEGAME_VERSION 5u
 #define MAX_SAMPLE_VOICES 16
 #define MAX_MIDI_VOICES 24
 #define MONSTER_FLYING_HEAD 4
@@ -174,6 +177,10 @@ enum {
     PROJECTILE_OWNER_ENEMY = 0,
     PROJECTILE_OWNER_PLAYER = 1,
     PROJECTILE_OWNER_NONE = 2,
+};
+
+enum {
+    PARTICLE_SMOKE = 0,
 };
 
 enum {
@@ -324,6 +331,7 @@ typedef struct {
     double strafe_timer;
     int strafe_dir;
     double pain_timer;
+    double hit_rim_timer;
     double attack_anim_timer;
     int is_boss;
 } Monster;
@@ -433,6 +441,7 @@ typedef struct {
 
 typedef struct {
     int active;
+    int type;
     Vec2 pos;
     Vec2 vel;
     double life;
@@ -468,7 +477,9 @@ typedef struct {
     int kills;
     double shot_cooldown;
     double weapon_flash;
+    double muzzle_light;
     double shot_trace;
+    double hit_marker;
     double hit_flash;
     double pickup_flash;
     double rapid_timer;
@@ -659,6 +670,7 @@ typedef struct {
     double time;
     uint8_t note;
     uint8_t velocity;
+    uint8_t channel;
     uint8_t on;
 } MidiMusicEvent;
 
@@ -670,9 +682,34 @@ typedef struct {
     double length;
 } MidiMusic;
 
+enum {
+    FM_INST_BASS = 0,
+    FM_INST_ORGAN,
+    FM_INST_EPIANO,
+    FM_INST_BELL,
+    FM_INST_PAD,
+    FM_INST_LEAD,
+    FM_INST_COUNT
+};
+
+typedef struct {
+    double mod_ratio;
+    double index_base;
+    double velocity_index;
+    double sub_level;
+    double attack;
+    double decay;
+    double sustain;
+    double hold;
+    double release;
+    double level;
+} FmInstrument;
+
 typedef struct {
     int active;
     int note;
+    int channel;
+    int instrument;
     double velocity;
     double phase;
     double mod_phase;
@@ -1025,19 +1062,49 @@ static double midi_note_frequency(int note)
     return 440.0 * pow(2.0, ((double)note - 69.0) / 12.0);
 }
 
-static double active_music_mod_ratio(int note)
+static const FmInstrument *fm_instrument(int instrument)
 {
-    static const double even_ratios[MUSIC_TRACK_COUNT] = {1.503, 3.002, 0.997, 2.414};
-    static const double odd_ratios[MUSIC_TRACK_COUNT] = {1.997, 2.498, 1.251, 1.618};
-    int track = active_music_track >= 0 && active_music_track < MUSIC_TRACK_COUNT ? active_music_track : MUSIC_TRACK_DIES_IRAE;
-    return (note & 1) ? odd_ratios[track] : even_ratios[track];
+    static const FmInstrument instruments[FM_INST_COUNT] = {
+        {0.503, 1.0, 1.4, 0.30, 0.006, 8.4, 0.18, 0.22, 18.0, 0.82},
+        {1.997, 2.1, 2.2, 0.12, 0.014, 2.0, 0.72, 0.30, 8.2, 0.70},
+        {2.002, 1.5, 1.8, 0.18, 0.010, 4.6, 0.34, 0.42, 7.0, 0.78},
+        {3.018, 3.7, 2.8, 0.04, 0.004, 7.8, 0.10, 0.32, 5.8, 0.54},
+        {1.251, 0.9, 1.0, 0.22, 0.050, 1.2, 0.68, 0.58, 3.8, 0.48},
+        {2.414, 3.1, 3.0, 0.08, 0.008, 5.8, 0.22, 0.24, 10.0, 0.62},
+    };
+    if (instrument < 0 || instrument >= FM_INST_COUNT) {
+        instrument = FM_INST_EPIANO;
+    }
+    return &instruments[instrument];
 }
 
-static double active_music_index_base(void)
+static int active_music_track_index(void)
 {
-    static const double bases[MUSIC_TRACK_COUNT] = {2.5, 5.2, 1.4, 4.0};
-    int track = active_music_track >= 0 && active_music_track < MUSIC_TRACK_COUNT ? active_music_track : MUSIC_TRACK_DIES_IRAE;
-    return bases[track];
+    return active_music_track >= 0 && active_music_track < MUSIC_TRACK_COUNT ? active_music_track : MUSIC_TRACK_DIES_IRAE;
+}
+
+static int fm_instrument_for_note(int track, int channel, int note)
+{
+    if (note < 43) {
+        return FM_INST_BASS;
+    }
+    if (track == MUSIC_TRACK_MASONIC_FUNERAL) {
+        if (note >= 72) return FM_INST_BELL;
+        return (channel & 1) ? FM_INST_PAD : FM_INST_EPIANO;
+    }
+    if (track == MUSIC_TRACK_PATHETIQUE) {
+        if (note >= 76) return FM_INST_BELL;
+        if (note < 55) return FM_INST_EPIANO;
+        return (channel & 1) ? FM_INST_PAD : FM_INST_EPIANO;
+    }
+    if (track == MUSIC_TRACK_TOCCATA) {
+        if (note >= 74) return FM_INST_LEAD;
+        return (channel % 3) == 0 ? FM_INST_ORGAN : FM_INST_EPIANO;
+    }
+    if (note >= 76) {
+        return FM_INST_BELL;
+    }
+    return (channel & 1) ? FM_INST_ORGAN : FM_INST_EPIANO;
 }
 
 static double active_music_drone_root(void)
@@ -1052,14 +1119,18 @@ static double active_music_drone_root(void)
 
 static double fm_midi_voice_envelope(const FmMidiVoice *voice)
 {
-    double hold = clamp01(voice->age / FM_NOTE_ATTACK) * (0.10 + 0.90 * exp(-voice->age * FM_NOTE_DECAY));
+    const FmInstrument *instrument = fm_instrument(voice->instrument);
+    double attack = instrument->attack > 0.001 ? instrument->attack : FM_NOTE_ATTACK;
+    double sustain = instrument->sustain;
+    double hold = clamp01(voice->age / attack) *
+        (sustain + (1.0 - sustain) * exp(-voice->age * instrument->decay));
     if (voice->release_time >= 0.0) {
-        return voice->release_level * exp(-voice->release_time * FM_NOTE_RELEASE_DECAY);
+        return voice->release_level * exp(-voice->release_time * instrument->release);
     }
     return hold;
 }
 
-static void fm_midi_note_on(uint8_t note, uint8_t velocity)
+static void fm_midi_note_on(uint8_t note, uint8_t velocity, uint8_t channel)
 {
     int slot = -1;
     double oldest = -1.0;
@@ -1081,6 +1152,8 @@ static void fm_midi_note_on(uint8_t note, uint8_t velocity)
     midi_voices[slot] = (FmMidiVoice){
         .active = 1,
         .note = note,
+        .channel = channel,
+        .instrument = fm_instrument_for_note(active_music_track_index(), channel, note),
         .velocity = clamp01(velocity / 127.0),
         .phase = 0.0,
         .mod_phase = 0.0,
@@ -1090,11 +1163,11 @@ static void fm_midi_note_on(uint8_t note, uint8_t velocity)
     };
 }
 
-static void fm_midi_note_off(uint8_t note)
+static void fm_midi_note_off(uint8_t note, uint8_t channel)
 {
     for (int i = 0; i < MAX_MIDI_VOICES; ++i) {
         FmMidiVoice *voice = &midi_voices[i];
-        if (voice->active && voice->note == note && voice->release_time < 0.0) {
+        if (voice->active && voice->note == note && voice->channel == channel && voice->release_time < 0.0) {
             voice->release_level = fm_midi_voice_envelope(voice);
             voice->release_time = 0.0;
         }
@@ -1113,7 +1186,8 @@ static double fm_midi_voices_sample(void)
             continue;
         }
 
-        if (voice->release_time < 0.0 && voice->age >= FM_NOTE_MAX_HOLD) {
+        const FmInstrument *instrument = fm_instrument(voice->instrument);
+        if (voice->release_time < 0.0 && voice->age >= instrument->hold) {
             voice->release_level = fm_midi_voice_envelope(voice);
             voice->release_time = 0.0;
         }
@@ -1125,11 +1199,11 @@ static double fm_midi_voices_sample(void)
         }
 
         double freq = midi_note_frequency(voice->note);
-        double ratio = active_music_mod_ratio(voice->note);
-        double index = active_music_index_base() + voice->velocity * 3.8;
+        double ratio = instrument->mod_ratio * (voice->note & 1 ? 1.003 : 0.997);
+        double index = instrument->index_base + voice->velocity * instrument->velocity_index;
         double tone = sin(voice->phase + sin(voice->mod_phase) * index);
-        tone += sin(voice->phase * 0.5) * 0.18;
-        sample += tone * env * voice->velocity * 0.095;
+        tone += sin(voice->phase * 0.5) * instrument->sub_level;
+        sample += tone * env * voice->velocity * instrument->level * 0.090;
 
         voice->phase += freq * phase_step;
         voice->mod_phase += freq * ratio * phase_step;
@@ -1157,9 +1231,9 @@ static double fm_midi_music_sample(void)
            music->events[music->next_event].time <= music->playhead) {
         const MidiMusicEvent *event = &music->events[music->next_event++];
         if (event->on) {
-            fm_midi_note_on(event->note, event->velocity);
+            fm_midi_note_on(event->note, event->velocity, event->channel);
         } else {
-            fm_midi_note_off(event->note);
+            fm_midi_note_off(event->note, event->channel);
         }
     }
 
@@ -2181,6 +2255,7 @@ typedef struct {
     uint32_t tick;
     uint8_t note;
     uint8_t velocity;
+    uint8_t channel;
     uint8_t on;
 } MidiRawEvent;
 
@@ -2253,6 +2328,7 @@ static int compare_midi_raw_events(const void *a, const void *b)
     if (ea->tick < eb->tick) return -1;
     if (ea->tick > eb->tick) return 1;
     if (ea->on != eb->on) return ea->on ? 1 : -1;
+    if (ea->channel != eb->channel) return (int)ea->channel - (int)eb->channel;
     return (int)ea->note - (int)eb->note;
 }
 
@@ -2330,6 +2406,7 @@ static int parse_midi_track(const uint8_t *data,
         }
 
         uint8_t event_type = status & 0xF0u;
+        uint8_t channel = status & 0x0Fu;
         if (event_type == 0x80u || event_type == 0x90u) {
             if (pos + 2 > end) {
                 return 0;
@@ -2338,7 +2415,7 @@ static int parse_midi_track(const uint8_t *data,
             uint8_t velocity = data[pos++];
             uint8_t on = event_type == 0x90u && velocity > 0;
             if (!append_midi_raw_event(raw_events, raw_count, raw_capacity,
-                                       (MidiRawEvent){tick, note, velocity, on})) {
+                                       (MidiRawEvent){tick, note, velocity, channel, on})) {
                 return 0;
             }
         } else if (event_type == 0xA0u || event_type == 0xB0u || event_type == 0xE0u) {
@@ -2483,6 +2560,7 @@ static int load_midi_music(const char *path, MidiMusic *music)
                             midi_tick_to_seconds(raw_events[i].tick, tempo_events, tempo_count, ticks_per_quarter),
                             raw_events[i].note,
                             raw_events[i].velocity,
+                            raw_events[i].channel,
                             raw_events[i].on,
                         };
                     }
@@ -3173,6 +3251,17 @@ static void render_monster(const Camera *cam, const Monster *monster)
                     : monster_sprites[type][frame][anim_frame][tex_y * SPRITE_SIZE + tex_x]);
             if (!is_sprite_key(color)) {
                 uint32_t lit = shade(color, light);
+                if (monster->hit_rim_timer > 0.0) {
+                    double rim_t = clamp01(monster->hit_rim_timer / HIT_RIM_TIME);
+                    double u = tex_x / (double)(texture_size - 1);
+                    double v = tex_y / (double)(texture_size - 1);
+                    double edge = fmin(fmin(u, 1.0 - u), fmin(v, 1.0 - v));
+                    double rim = 1.0 - clamp01(edge * 8.0);
+                    double amount = rim_t * (0.18 + rim * 0.55);
+                    lit = mix_color(lit, rgb(255, 250, 230), amount);
+                    add_glow(stripe, y, rim_t * (0.10 + rim * 0.24));
+                    add_light(stripe, y, rim_t * rim * 0.16);
+                }
                 if (monster->pain_timer > 0.0) {
                     lit = mix_color(lit, rgb(255, 210, 118), clamp01(monster->pain_timer / 0.18));
                     add_glow(stripe, y, monster->pain_timer * 0.35);
@@ -3988,6 +4077,107 @@ static void render_light_buffer(void)
     }
 }
 
+static void render_muzzle_light(const GameState *game)
+{
+    if (game->muzzle_light <= 0.0) {
+        return;
+    }
+
+    double t = clamp01(game->muzzle_light / MUZZLE_LIGHT_TIME);
+    int cx = SCREEN_W / 2;
+    int cy = SCREEN_H / 2 + 8;
+    int mx = SCREEN_W / 2 + 31;
+    int my = SCREEN_H - 66;
+    int min_x = cx - 220;
+    int max_x = cx + 220;
+    int min_y = cy - 130;
+    int max_y = my + 44;
+    if (min_x < 0) min_x = 0;
+    if (max_x >= SCREEN_W) max_x = SCREEN_W - 1;
+    if (min_y < 0) min_y = 0;
+    if (max_y >= SCREEN_H - 14) max_y = SCREEN_H - 15;
+
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int x = min_x; x <= max_x; ++x) {
+            double cone_x = fabs((x - cx) / 220.0);
+            double cone_y = fabs((y - cy) / 150.0);
+            double cone = 1.0 - sqrt(cone_x * cone_x + cone_y * cone_y);
+            if (cone <= 0.0) {
+                continue;
+            }
+
+            double muzzle_x = (x - mx) / 72.0;
+            double muzzle_y = (y - my) / 54.0;
+            double muzzle = 1.0 - sqrt(muzzle_x * muzzle_x + muzzle_y * muzzle_y);
+            if (muzzle < 0.0) {
+                muzzle = 0.0;
+            }
+
+            int idx = y * SCREEN_W + x;
+            double depth = depth_buffer[idx];
+            if (depth > 40.0) {
+                depth = 8.0;
+            }
+            double depth_light = clamp01(1.0 - depth / 12.0);
+            double amount = t * t * (cone * 0.32 + muzzle * 0.72) * (0.28 + depth_light * 0.72);
+            if (amount <= 0.002) {
+                continue;
+            }
+            framebuffer[idx] = mix_color(framebuffer[idx], rgb(255, 154, 58), clamp01(amount * 0.34));
+            add_light(x, y, amount);
+            add_glow(x, y, amount * 0.24);
+        }
+    }
+}
+
+static void render_forest_weather_overlay(const GameState *game)
+{
+    if (game->generator_mode != GENERATOR_FOREST) {
+        return;
+    }
+
+    int tick = (int)(game->time * 60.0);
+    int h_limit = SCREEN_H - 32;
+    uint32_t rain_haze = rgb(64, 88, 104);
+    for (int y = 24; y < h_limit; y += 2) {
+        double band = 0.5 + 0.5 * sin(y * 0.045 + tick * 0.055);
+        double horizon = 1.0 - clamp01((y - 24) / (double)(h_limit - 24));
+        double amount = 0.008 + band * 0.010 + horizon * 0.016;
+        for (int x = 0; x < SCREEN_W; x += 2) {
+            int idx = y * SCREEN_W + x;
+            framebuffer[idx] = mix_color(framebuffer[idx], rain_haze, amount);
+            if (x + 1 < SCREEN_W) {
+                framebuffer[idx + 1] = mix_color(framebuffer[idx + 1], rain_haze, amount * 0.65);
+            }
+            if (y + 1 < SCREEN_H - 14) {
+                framebuffer[idx + SCREEN_W] = mix_color(framebuffer[idx + SCREEN_W], rain_haze, amount * 0.55);
+            }
+        }
+    }
+
+    uint32_t rain = rgb(130, 166, 190);
+    for (int i = 0; i < 86; ++i) {
+        uint32_t h = star_hash(i * 47 + tick / 2, i * 31 + 17);
+        int x = (int)((h + (uint32_t)(tick * 2)) % SCREEN_W);
+        double strength = 0.055 + ((h >> 18) & 31u) / 760.0;
+        for (int y = 22; y < h_limit; y += 2) {
+            int sway = (int)sin(y * 0.026 + i * 0.71 + tick * 0.030);
+            int px = x + sway;
+            if (px < 0 || px >= SCREEN_W) {
+                continue;
+            }
+            double horizon = 1.0 - clamp01((y - 22) / (double)(h_limit - 22));
+            double wave = 0.55 + 0.45 * sin(y * 0.090 + i * 1.37 + tick * 0.18);
+            double amount = strength * (0.50 + horizon * 0.80) * wave;
+            int idx = y * SCREEN_W + px;
+            framebuffer[idx] = mix_color(framebuffer[idx], rain, amount);
+            if (px + 1 < SCREEN_W) {
+                framebuffer[idx + 1] = mix_color(framebuffer[idx + 1], rain, amount * 0.35);
+            }
+        }
+    }
+}
+
 static void render_color_grade(const GameState *game)
 {
     if (!vignette_ready) {
@@ -4041,13 +4231,28 @@ static void render_hit_flash(const GameState *game)
     }
 }
 
-static void render_crosshair(void)
+static void draw_line(int x0, int y0, int x1, int y1, uint32_t color);
+
+static void render_crosshair(const GameState *game)
 {
     uint32_t c = rgb(232, 226, 196);
     fill_rect(SCREEN_W / 2 - 5, SCREEN_H / 2, 4, 1, c);
     fill_rect(SCREEN_W / 2 + 2, SCREEN_H / 2, 4, 1, c);
     fill_rect(SCREEN_W / 2, SCREEN_H / 2 - 5, 1, 4, c);
     fill_rect(SCREEN_W / 2, SCREEN_H / 2 + 2, 1, 4, c);
+    if (game->hit_marker > 0.0) {
+        double t = clamp01(game->hit_marker / HIT_MARKER_TIME);
+        uint32_t marker = mix_color(rgb(255, 66, 44), rgb(255, 252, 230), t);
+        int gap = 8 + (int)((1.0 - t) * 3.0);
+        draw_line(SCREEN_W / 2 - gap - 3, SCREEN_H / 2 - gap - 3,
+                  SCREEN_W / 2 - gap, SCREEN_H / 2 - gap, marker);
+        draw_line(SCREEN_W / 2 + gap + 3, SCREEN_H / 2 - gap - 3,
+                  SCREEN_W / 2 + gap, SCREEN_H / 2 - gap, marker);
+        draw_line(SCREEN_W / 2 - gap - 3, SCREEN_H / 2 + gap + 3,
+                  SCREEN_W / 2 - gap, SCREEN_H / 2 + gap, marker);
+        draw_line(SCREEN_W / 2 + gap + 3, SCREEN_H / 2 + gap + 3,
+                  SCREEN_W / 2 + gap, SCREEN_H / 2 + gap, marker);
+    }
 }
 
 static void draw_line(int x0, int y0, int x1, int y1, uint32_t color)
@@ -5470,6 +5675,8 @@ static void render_scene(const Camera *cam, const GameState *game)
         pass_start = now;
     }
 
+    render_forest_weather_overlay(game);
+    render_muzzle_light(game);
     if (render_effects == RENDER_EFFECTS_FULL) {
         render_light_buffer();
         render_bloom();
@@ -5491,7 +5698,7 @@ static void render_scene(const Camera *cam, const GameState *game)
         pass_start = now;
     }
 
-    render_crosshair();
+    render_crosshair(game);
     render_shot_trace(game);
     render_weapon(game);
     render_relic_notice(game);
@@ -7364,6 +7571,7 @@ static void spawn_explosion(GameState *game, Vec2 pos, double radius)
                 double a = i * (M_PI * 2.0 / 10.0);
                 double speed = 0.28 + (i % 3) * 0.10;
                 p->active = 1;
+                p->type = PARTICLE_SMOKE;
                 p->pos = pos;
                 p->vel = (Vec2){cos(a) * speed, sin(a) * speed};
                 p->life = 0.85 + (i % 4) * 0.08;
@@ -8697,6 +8905,7 @@ static void player_fire(GameState *game, const Camera *cam)
         }
         game->shot_cooldown = game->rapid_timer > 0.0 ? FIREBALL_COOLDOWN_TIME * 0.70 : FIREBALL_COOLDOWN_TIME;
         game->weapon_flash = FIREBALL_FLASH_TIME;
+        game->muzzle_light = MUZZLE_LIGHT_TIME;
         game->shot_trace = 0.0;
         return;
     }
@@ -8760,6 +8969,7 @@ static void player_fire(GameState *game, const Camera *cam)
     play_sfx(SFX_PISTOL, 0.50);
     game->shot_cooldown = game->rapid_timer > 0.0 ? SHOT_COOLDOWN_TIME * 0.48 : SHOT_COOLDOWN_TIME;
     game->weapon_flash = WEAPON_FLASH_TIME;
+    game->muzzle_light = MUZZLE_LIGHT_TIME;
     game->shot_trace = WEAPON_FLASH_TIME;
 
     int best = -1;
@@ -8795,6 +9005,8 @@ static void player_fire(GameState *game, const Camera *cam)
         Monster *monster = &game->monsters[best];
         int damage = PLAYER_DAMAGE + (game->damage_timer > 0.0 ? 2 : 0);
         damage_monster(game, monster, damage, cam->pos);
+        monster->hit_rim_timer = HIT_RIM_TIME;
+        game->hit_marker = HIT_MARKER_TIME;
     }
 }
 
@@ -8841,6 +9053,12 @@ static void update_game(GameState *game, const Camera *cam, double dt)
             monster->pain_timer -= dt;
             if (monster->pain_timer < 0.0) {
                 monster->pain_timer = 0.0;
+            }
+        }
+        if (monster->hit_rim_timer > 0.0) {
+            monster->hit_rim_timer -= dt;
+            if (monster->hit_rim_timer < 0.0) {
+                monster->hit_rim_timer = 0.0;
             }
         }
         if (monster->attack_anim_timer > 0.0) {
@@ -8898,9 +9116,17 @@ static void update_game(GameState *game, const Camera *cam, double dt)
         game->weapon_flash -= dt;
         if (game->weapon_flash < 0.0) game->weapon_flash = 0.0;
     }
+    if (game->muzzle_light > 0.0) {
+        game->muzzle_light -= dt;
+        if (game->muzzle_light < 0.0) game->muzzle_light = 0.0;
+    }
     if (game->shot_trace > 0.0) {
         game->shot_trace -= dt;
         if (game->shot_trace < 0.0) game->shot_trace = 0.0;
+    }
+    if (game->hit_marker > 0.0) {
+        game->hit_marker -= dt;
+        if (game->hit_marker < 0.0) game->hit_marker = 0.0;
     }
     if (game->pickup_flash > 0.0) {
         game->pickup_flash -= dt;
@@ -8928,7 +9154,6 @@ static void update_game(GameState *game, const Camera *cam, double dt)
             game->hit_flash = 0.0;
         }
     }
-
     for (int i = 0; i < MAX_DECALS; ++i) {
         Decal *decal = &game->decals[i];
         if (decal->active) {
@@ -9058,6 +9283,10 @@ static int verify_player_weapon(void)
     player_fire(&game, &cam);
     if (game.ammo != ammo_before_pistol - 1 || game.monsters[0].hp != 2 || !game.monsters[0].active) {
         fprintf(stderr, "error: pistol weapon failed first hit verification\n");
+        return 0;
+    }
+    if (game.muzzle_light <= 0.0 || game.hit_marker <= 0.0 || game.monsters[0].hit_rim_timer <= 0.0) {
+        fprintf(stderr, "error: pistol hit feedback timers were not armed\n");
         return 0;
     }
 
@@ -10275,6 +10504,64 @@ static int verify_music_track_mapping(void)
     return 1;
 }
 
+static int verify_fm_instrument_distribution(void)
+{
+    int mask = 0;
+    static const struct {
+        int track;
+        int channel;
+        int note;
+    } checks[] = {
+        {MUSIC_TRACK_DIES_IRAE, 0, 36},
+        {MUSIC_TRACK_DIES_IRAE, 1, 60},
+        {MUSIC_TRACK_MASONIC_FUNERAL, 2, 62},
+        {MUSIC_TRACK_PATHETIQUE, 0, 52},
+        {MUSIC_TRACK_TOCCATA, 0, 67},
+        {MUSIC_TRACK_TOCCATA, 1, 79},
+    };
+    for (int i = 0; i < (int)(sizeof(checks) / sizeof(checks[0])); ++i) {
+        int instrument = fm_instrument_for_note(checks[i].track, checks[i].channel, checks[i].note);
+        if (instrument < 0 || instrument >= FM_INST_COUNT) {
+            fprintf(stderr, "error: FM instrument selection returned invalid preset\n");
+            return 0;
+        }
+        mask |= 1 << instrument;
+    }
+    int used = 0;
+    for (int i = 0; i < FM_INST_COUNT; ++i) {
+        if (mask & (1 << i)) {
+            used++;
+        }
+    }
+    if ((mask & (1 << FM_INST_EPIANO)) == 0 || used < 4) {
+        fprintf(stderr, "error: FM instrument distribution is too narrow\n");
+        return 0;
+    }
+
+    set_active_music_track(MUSIC_TRACK_PATHETIQUE);
+    memset(midi_voices, 0, sizeof(midi_voices));
+    fm_midi_note_on(40, 96, 0);
+    fm_midi_note_on(60, 100, 1);
+    fm_midi_note_on(79, 84, 2);
+    double peak = 0.0;
+    for (int i = 0; i < 512; ++i) {
+        double sample = fm_midi_voices_sample();
+        if (!isfinite(sample)) {
+            fprintf(stderr, "error: FM instrument sample became non-finite\n");
+            return 0;
+        }
+        if (fabs(sample) > peak) {
+            peak = fabs(sample);
+        }
+    }
+    if (peak <= 0.0001 || peak > 8.0) {
+        fprintf(stderr, "error: FM instrument sample peak is invalid\n");
+        return 0;
+    }
+    set_active_music_track(MUSIC_TRACK_FOREST);
+    return 1;
+}
+
 static int verify_help_key_close(void)
 {
     GameState game;
@@ -10773,6 +11060,9 @@ static int dump_frame_mode(const char *path, int mode)
         return 1;
     }
     if (!verify_music_track_mapping()) {
+        return 1;
+    }
+    if (!verify_fm_instrument_distribution()) {
         return 1;
     }
     if (!verify_help_key_close()) {
