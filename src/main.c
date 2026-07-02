@@ -108,6 +108,10 @@
 #define MUZZLE_LIGHT_TIME 0.075
 #define HIT_MARKER_TIME 0.16
 #define HIT_RIM_TIME 0.14
+#define PLAYER_DAMAGE_FLASH_TIME 0.28
+#define SCREEN_SHAKE_TIME 0.22
+#define MONSTER_WINDUP_TIME 0.36
+#define BOSS_WINDUP_TIME 0.44
 #define FIREBALL_DIRECT_DAMAGE 5
 #define FIREBALL_SPLASH_DAMAGE 4
 #define FIREBALL_RADIUS 1.25
@@ -138,7 +142,7 @@
 #define SAVEGAME_PATH_FORMAT "dioom_slot%d.sav"
 #define SAVEGAME_TMP_PATH_FORMAT "dioom_slot%d.sav.tmp"
 #define SAVEGAME_MAGIC 0x4D4F4944u
-#define SAVEGAME_VERSION 5u
+#define SAVEGAME_VERSION 6u
 #define MAX_SAMPLE_VOICES 16
 #define MAX_MIDI_VOICES 24
 #define MONSTER_FLYING_HEAD 4
@@ -336,6 +340,7 @@ typedef struct {
     double pain_timer;
     double hit_rim_timer;
     double attack_anim_timer;
+    double attack_windup_timer;
     int is_boss;
 } Monster;
 
@@ -484,6 +489,11 @@ typedef struct {
     double shot_trace;
     double hit_marker;
     double hit_flash;
+    double player_damage_flash;
+    double damage_dir_x;
+    double damage_dir_y;
+    double screen_shake_timer;
+    double screen_shake_strength;
     double pickup_flash;
     double rapid_timer;
     double damage_timer;
@@ -623,16 +633,40 @@ static int scale_enemy_damage_for_difficulty(const GameState *game, int damage)
     return scaled > 0 ? scaled : 1;
 }
 
-static void apply_player_damage(GameState *game, int damage)
+static void apply_player_damage_from(GameState *game, int damage, Vec2 source, Vec2 player_pos, double shake_strength)
 {
     if (game->trainer) {
         return;
     }
     game->player_health -= scale_enemy_damage_for_difficulty(game, damage);
+    Vec2 dir = {
+        source.x - player_pos.x,
+        source.y - player_pos.y,
+    };
+    double dir_len = sqrt(dir.x * dir.x + dir.y * dir.y);
+    if (dir_len > 0.0001) {
+        dir.x /= dir_len;
+        dir.y /= dir_len;
+    } else {
+        dir = (Vec2){0.0, 0.0};
+    }
+    game->damage_dir_x = dir.x;
+    game->damage_dir_y = dir.y;
+    game->hit_flash = 0.18;
+    game->player_damage_flash = PLAYER_DAMAGE_FLASH_TIME;
+    game->screen_shake_timer = SCREEN_SHAKE_TIME;
+    if (shake_strength > game->screen_shake_strength) {
+        game->screen_shake_strength = shake_strength;
+    }
     if (game->player_health <= 0) {
         game->player_health = 0;
         game->game_over = 1;
     }
+}
+
+static void apply_player_damage(GameState *game, int damage)
+{
+    apply_player_damage_from(game, damage, (Vec2){0.0, 0.0}, (Vec2){0.0, 0.0}, 0.10);
 }
 
 typedef struct {
@@ -773,10 +807,12 @@ static double house_min_x(const House *house);
 static double house_max_x(const House *house);
 static double house_min_y(const House *house);
 static double house_max_y(const House *house);
+static double vec_len(Vec2 v);
 static Vec2 vec_norm(Vec2 v);
 static double vec_dot(Vec2 a, Vec2 b);
 static int parse_render_effects(const char *text, int *out_effects);
 static const char *render_effects_config_text(int effects);
+static void blend_rect(int x, int y, int w, int h, uint32_t color, double amount);
 static GameState *active_game = NULL;
 static SfxSample sfx_samples[SFX_COUNT];
 static SampleVoice sample_voices[MAX_SAMPLE_VOICES];
@@ -3267,6 +3303,15 @@ static void render_monster(const Camera *cam, const Monster *monster)
                     add_glow(stripe, y, rim_t * (0.10 + rim * 0.24));
                     add_light(stripe, y, rim_t * rim * 0.16);
                 }
+                if (monster->attack_windup_timer > 0.0) {
+                    double windup_time = monster->is_boss ? BOSS_WINDUP_TIME : MONSTER_WINDUP_TIME;
+                    double wind_t = clamp01(monster->attack_windup_timer / windup_time);
+                    double pulse = 0.45 + 0.55 * sin((1.0 - wind_t) * M_PI * 5.0);
+                    double amount = clamp01(0.20 + pulse * 0.36);
+                    lit = mix_color(lit, monster->is_boss ? rgb(255, 82, 44) : rgb(255, 192, 112), amount);
+                    add_glow(stripe, y, amount * (monster->is_boss ? 0.34 : 0.22));
+                    add_light(stripe, y, amount * 0.10);
+                }
                 if (monster->pain_timer > 0.0) {
                     lit = mix_color(lit, rgb(255, 210, 118), clamp01(monster->pain_timer / 0.18));
                     add_glow(stripe, y, monster->pain_timer * 0.35);
@@ -4343,6 +4388,37 @@ static void render_hit_flash(const GameState *game)
             framebuffer[y * SCREEN_W + x] = mix_color(color, rgb(190, 18, 18), clamp01(intensity * 0.55));
         }
     }
+}
+
+static void render_player_damage_feedback(const Camera *cam, const GameState *game)
+{
+    if (game->player_damage_flash <= 0.0) {
+        return;
+    }
+
+    double t = clamp01(game->player_damage_flash / PLAYER_DAMAGE_FLASH_TIME);
+    blend_rect(0, 0, SCREEN_W, SCREEN_H - 14, rgb(160, 8, 8), t * 0.18);
+
+    Vec2 damage_dir = {game->damage_dir_x, game->damage_dir_y};
+    if (vec_len(damage_dir) <= 0.001) {
+        return;
+    }
+
+    Vec2 right = {-cam->dir.y, cam->dir.x};
+    double side = vec_dot(damage_dir, right);
+    double front = vec_dot(damage_dir, cam->dir);
+    int cx = SCREEN_W / 2 + (int)(side * 154.0);
+    int cy = SCREEN_H / 2 - 8 - (int)(front * 96.0);
+    if (cx < 28) cx = 28;
+    if (cx > SCREEN_W - 28) cx = SCREEN_W - 28;
+    if (cy < 34) cy = 34;
+    if (cy > SCREEN_H - 70) cy = SCREEN_H - 70;
+
+    uint32_t hot = mix_color(rgb(180, 18, 14), rgb(255, 180, 122), t);
+    int size = 8 + (int)(t * 8.0);
+    blend_rect(cx - size, cy - size, size * 2, size * 2, rgb(120, 0, 0), t * 0.18);
+    fill_rect(cx - size / 2, cy - 2, size, 4, hot);
+    fill_rect(cx - 2, cy - size / 2, 4, size, hot);
 }
 
 static void draw_line(int x0, int y0, int x1, int y1, uint32_t color);
@@ -5570,6 +5646,17 @@ static double elapsed_ms(uint64_t start, uint64_t end)
 
 static void render_scene(const Camera *cam, const GameState *game)
 {
+    Camera shake_cam = *cam;
+    if (game->screen_shake_timer > 0.0 && game->screen_shake_strength > 0.0) {
+        double t = clamp01(game->screen_shake_timer / SCREEN_SHAKE_TIME);
+        double jitter_x = sin(game->time * 91.0) * game->screen_shake_strength * t;
+        double jitter_y = cos(game->time * 117.0) * game->screen_shake_strength * 0.65 * t;
+        Vec2 right = {-shake_cam.dir.y, shake_cam.dir.x};
+        shake_cam.pos.x += right.x * jitter_x + shake_cam.dir.x * jitter_y;
+        shake_cam.pos.y += right.y * jitter_x + shake_cam.dir.y * jitter_y;
+        cam = &shake_cam;
+    }
+
     int fast_render = render_quality == RENDER_QUALITY_FAST;
     RenderProfile *profile = active_profile;
     uint64_t total_start = 0;
@@ -5806,6 +5893,7 @@ static void render_scene(const Camera *cam, const GameState *game)
         render_color_grade(game, render_effects);
     }
     render_hit_flash(game);
+    render_player_damage_feedback(cam, game);
     if (profile) {
         uint64_t now = SDL_GetPerformanceCounter();
         profile->post_ms = elapsed_ms(pass_start, now);
@@ -7662,6 +7750,11 @@ static void spawn_decal(GameState *game, Vec2 pos, int variant, double radius, d
 static void spawn_explosion(GameState *game, Vec2 pos, double radius)
 {
     play_sfx(SFX_EXPLOSION, 0.52);
+    game->screen_shake_timer = SCREEN_SHAKE_TIME;
+    double shake = clamp01(radius * 0.10) * 0.20;
+    if (shake > game->screen_shake_strength) {
+        game->screen_shake_strength = shake;
+    }
     for (int i = 0; i < MAX_PROJECTILES; ++i) {
         Projectile *p = &game->projectiles[i];
         if (!p->active) {
@@ -7802,7 +7895,7 @@ static void spawn_monster_shot(GameState *game, const Monster *monster, const Ca
             p->owner = PROJECTILE_OWNER_ENEMY;
             p->type = PROJECTILE_ENEMY_BOLT;
             p->damage = monster->is_boss ? 18 : monster_projectile_damage(monster->type);
-            p->radius = 0.0;
+            p->radius = monster->is_boss ? 1.0 : 0.0;
             p->pos = (Vec2){
                 monster->pos.x + dir.x * 0.55,
                 monster->pos.y + dir.y * 0.55,
@@ -7875,8 +7968,7 @@ static void update_projectiles(GameState *game, const Camera *cam, double dt)
             double dy = p->pos.y - cam->pos.y;
             if (dx * dx + dy * dy < 0.18 && game->hit_flash <= 0.0) {
                 p->active = 0;
-                apply_player_damage(game, p->damage);
-                game->hit_flash = 0.18;
+                apply_player_damage_from(game, p->damage, p->pos, cam->pos, p->radius > 0.5 ? 0.22 : 0.10);
                 play_sfx(SFX_HURT, 0.44);
             }
         } else if (p->owner == PROJECTILE_OWNER_PLAYER) {
@@ -9124,6 +9216,25 @@ static void player_fire(GameState *game, const Camera *cam)
     }
 }
 
+static void execute_monster_attack(GameState *game, Monster *monster, const Camera *cam, double player_dist)
+{
+    if ((monster_uses_projectile(monster->type) || monster->is_boss) &&
+        player_dist < (monster->is_boss ? 7.2 : 8.0) &&
+        (!monster->is_boss || player_dist > 1.35)) {
+        spawn_monster_shot(game, monster, cam);
+    } else if (!monster_uses_projectile(monster->type) &&
+               player_dist < (monster->is_boss ? 1.25 : monster_melee_range(monster->type))) {
+        apply_player_damage_from(
+            game,
+            monster->is_boss ? 24 : monster_melee_damage(monster->type),
+            monster->pos,
+            cam->pos,
+            monster->is_boss ? 0.24 : 0.12);
+        play_sfx(SFX_MELEE, 0.46);
+        play_sfx(SFX_HURT, 0.34);
+    }
+}
+
 static void update_game(GameState *game, const Camera *cam, double dt)
 {
     game->time += dt;
@@ -9181,6 +9292,14 @@ static void update_game(GameState *game, const Camera *cam, double dt)
                 monster->attack_anim_timer = 0.0;
             }
         }
+        int windup_ready = 0;
+        if (monster->attack_windup_timer > 0.0) {
+            monster->attack_windup_timer -= dt;
+            if (monster->attack_windup_timer <= 0.0) {
+                monster->attack_windup_timer = 0.0;
+                windup_ready = 1;
+            }
+        }
 
         if (!monster->active) {
             continue;
@@ -9188,7 +9307,6 @@ static void update_game(GameState *game, const Camera *cam, double dt)
         if (!combat_active) {
             continue;
         }
-        monster->shoot_timer -= dt;
         Vec2 to_player = {
             cam->pos.x - monster->pos.x,
             cam->pos.y - monster->pos.y,
@@ -9197,24 +9315,28 @@ static void update_game(GameState *game, const Camera *cam, double dt)
         int can_attack = monster->ai_state == 2 &&
                          monster_can_directly_see_player(monster, cam, &player_dist) &&
                          vec_dot(vec_norm(monster->facing), vec_norm(to_player)) > 0.55;
-        while (monster->shoot_timer <= 0.0 && can_attack) {
+
+        if (windup_ready) {
+            if (can_attack) {
+                execute_monster_attack(game, monster, cam, player_dist);
+            }
+            continue;
+        }
+        if (monster->attack_windup_timer > 0.0) {
+            continue;
+        }
+
+        monster->shoot_timer -= dt;
+        if (monster->shoot_timer <= 0.0 && can_attack) {
             monster->facing = vec_norm((Vec2){
                 cam->pos.x - monster->pos.x,
                 cam->pos.y - monster->pos.y,
             });
-            monster->facing_lock = 0.45;
-            monster->attack_anim_timer = monster->is_boss ? 0.42 : 0.34;
-            if ((monster_uses_projectile(monster->type) || monster->is_boss) &&
-                player_dist < (monster->is_boss ? 7.2 : 8.0) &&
-                (!monster->is_boss || player_dist > 1.35)) {
-                spawn_monster_shot(game, monster, cam);
-            } else if (!monster_uses_projectile(monster->type) && player_dist < (monster->is_boss ? 1.25 : monster_melee_range(monster->type))) {
-                apply_player_damage(game, monster->is_boss ? 24 : monster_melee_damage(monster->type));
-                game->hit_flash = 0.18;
-                play_sfx(SFX_MELEE, 0.46);
-                play_sfx(SFX_HURT, 0.34);
-            }
-            monster->shoot_timer += monster->is_boss ? 1.65 : monster_shot_cooldown(monster->type, i);
+            double windup = monster->is_boss ? BOSS_WINDUP_TIME : MONSTER_WINDUP_TIME;
+            monster->facing_lock = windup + 0.12;
+            monster->attack_anim_timer = windup;
+            monster->attack_windup_timer = windup;
+            monster->shoot_timer = monster->is_boss ? 1.65 : monster_shot_cooldown(monster->type, i);
         }
         if (monster->shoot_timer <= 0.0) {
             monster->shoot_timer = 0.25;
@@ -9266,6 +9388,19 @@ static void update_game(GameState *game, const Camera *cam, double dt)
         game->hit_flash -= dt;
         if (game->hit_flash < 0.0) {
             game->hit_flash = 0.0;
+        }
+    }
+    if (game->player_damage_flash > 0.0) {
+        game->player_damage_flash -= dt;
+        if (game->player_damage_flash < 0.0) {
+            game->player_damage_flash = 0.0;
+        }
+    }
+    if (game->screen_shake_timer > 0.0) {
+        game->screen_shake_timer -= dt;
+        if (game->screen_shake_timer <= 0.0) {
+            game->screen_shake_timer = 0.0;
+            game->screen_shake_strength = 0.0;
         }
     }
     for (int i = 0; i < MAX_DECALS; ++i) {
@@ -9825,7 +9960,14 @@ static int verify_monster_melee_attack(void)
 
     int health = game.player_health;
     update_game(&game, &cam, 1.0 / 60.0);
-    if (game.player_health >= health) {
+    if (game.player_health != health || game.monsters[0].attack_windup_timer <= 0.0) {
+        fprintf(stderr, "error: melee monster did not telegraph before damage\n");
+        return 0;
+    }
+    for (int i = 0; i < 30; ++i) {
+        update_game(&game, &cam, 1.0 / 60.0);
+    }
+    if (game.player_health >= health || game.player_damage_flash <= 0.0 || game.screen_shake_timer <= 0.0) {
         fprintf(stderr, "error: melee monster did not damage the player\n");
         return 0;
     }
@@ -11412,6 +11554,7 @@ typedef struct {
     int shop_selected;
     int game_started;
     int fullscreen;
+    int relative_mouse;
     int show_fps;
     int show_timings;
     int render_quality;
@@ -11457,6 +11600,20 @@ typedef struct {
 } SaveGamePayload;
 
 static void close_slot_menu(Runtime *rt);
+
+static void set_runtime_relative_mouse(Runtime *rt, int enabled)
+{
+    enabled = enabled ? 1 : 0;
+    if (rt->relative_mouse == enabled) {
+        return;
+    }
+    if (SDL_SetRelativeMouseMode(enabled ? SDL_TRUE : SDL_FALSE) != 0) {
+        fprintf(stderr, "warning: SDL_SetRelativeMouseMode failed: %s\n", SDL_GetError());
+        return;
+    }
+    rt->relative_mouse = enabled;
+    SDL_ShowCursor(enabled ? SDL_DISABLE : SDL_ENABLE);
+}
 
 static SaveGameHeader savegame_header(uint64_t saved_at)
 {
@@ -12067,6 +12224,7 @@ static int parse_runtime_config(int argc, char **argv, RuntimeConfig *config)
 
 static void shutdown_runtime(Runtime *rt)
 {
+    set_runtime_relative_mouse(rt, 0);
     if (rt->settings_ready) {
         save_runtime_settings(rt);
         rt->settings_ready = 0;
@@ -12351,8 +12509,12 @@ static void runtime_frame(void *userdata)
             } else if (key == SDLK_F9 && event.key.repeat == 0) {
                 open_load_menu(rt);
             }
+        } else if (event.type == SDL_MOUSEMOTION) {
+            if (!rt->paused && !rt->menu_open && !rt->shop_open && rt->game_started && !rt->game.game_over) {
+                rotate_camera(&rt->cam, event.motion.xrel * 0.0024);
+            }
         } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
-            if (!rt->paused && !rt->menu_open) {
+            if (!rt->paused && !rt->menu_open && !rt->shop_open) {
                 player_fire(&rt->game, &rt->cam);
             }
         }
@@ -12365,6 +12527,10 @@ static void runtime_frame(void *userdata)
         shutdown_runtime(rt);
         return;
     }
+
+    set_runtime_relative_mouse(
+        rt,
+        rt->game_started && !rt->paused && !rt->menu_open && !rt->shop_open && !rt->game.game_over);
 
     uint64_t now = SDL_GetPerformanceCounter();
     double dt = (double)(now - rt->prev) / (double)SDL_GetPerformanceFrequency();
@@ -12390,10 +12556,10 @@ static void runtime_frame(void *userdata)
 
     if (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) forward += 1.0;
     if (keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN]) forward -= 1.0;
-    if (keys[SDL_SCANCODE_Q]) strafe -= 1.0;
-    if (keys[SDL_SCANCODE_E]) strafe += 1.0;
-    if (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]) turn -= 1.0;
-    if (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) turn += 1.0;
+    if (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_Q]) strafe -= 1.0;
+    if (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_E]) strafe += 1.0;
+    if (keys[SDL_SCANCODE_LEFT]) turn -= 1.0;
+    if (keys[SDL_SCANCODE_RIGHT]) turn += 1.0;
 
     if (!rt->paused && !rt->menu_open && !rt->game.game_over && (forward != 0.0 || strafe != 0.0)) {
         move_camera(&rt->cam, &rt->game, forward, strafe, dt);
