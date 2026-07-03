@@ -24,11 +24,39 @@ Na mapie są itemy: apteczki, amunicja, rapid fire, damage boost, klucz, firebal
 
 Zebranie kompletu czterech relikwii odblokowuje bramę bossa w lesie. Boss jest dużo większy i twardszy od zwykłych przeciwników, ma mocniejszy atak z bliska i wolniejszy, bolesny pocisk dystansowy. Zwycięstwo następuje dopiero po zabiciu bossa. Walka ma lekkie odpychanie przy kolizji z potworami, sample dźwiękowe strzałów/pickupów/eksplozji oraz pauzę, restart i fullscreen. Poziomy trudności to łatwy, normalny, trudny i nightmare; wyższe poziomy podbijają HP oraz obrażenia przeciwników.
 
-Render ma eksperymentalną mgłę wolumetryczną: dystansowy fog na ścianach, podłodze, suficie i sprite'ach oraz animowany, kłębiasty pass po buforze świata oparty o `z_buffer`. Mgła jest cięższa przy ziemi.
+## Renderer
 
-Na ścianach są pochodnie renderowane jako softwareowe sprite'y z poświatą. Ich ciepłe światło wpływa lokalnie na ściany, podłogę, sufit i wolumetryczną mgłę, a same pochodnie są sortowane i zasłaniane przez kolumnowy `z_buffer`. Wewnętrzne korytarze mają dodatkowe pochodnie, więc mrok zostaje, ale mapa nie ma długich martwych czarnych odcinków.
+Renderer działa w całości softwareowo i składa finalny obraz w `uint32_t framebuffer[640x480]`. SDL2 tworzy okno, przyjmuje input, obsługuje audio i wyświetla gotową teksturę; raycast, sprite'y, światła, efekty i UI są liczone po stronie CPU.
 
-Render ma dodatkowe softwareowe passy: light buffer/pseudo-deferred composite, bloom z blur buforem, threshold bloom dla jasnych pikseli, selektywny edge antialiasing, proceduralny bump/normal lighting ścian, dynamiczne cienie pod sprite'ami, scorch decale po eksplozjach, soft particles dla dymu/iskier i końcowy color grading z vignette. Cięższe passy post-processingu są przełączane przez `--effects full` albo w menu ustawień.
+Główne funkcje renderera:
+
+- Kolumnowy raycaster ścian z DDA, korekcją dystansu, teksturowaniem z atlasu PPM i obsługą zwykłych, zamkniętych oraz otwierających się drzwi.
+- Osobny pass podłogi i sufitu z perspektywicznym mapowaniem tekstur, dystansowym światłem i fogiem.
+- Tryb lasu z proceduralnym nocnym niebem, gwiazdami, księżycem, poświatą księżyca, widocznością księżyca cache'owaną na mapie oraz zimnym światłem mieszanym z podłożem i ścianami.
+- Dwa tryby jakości: `fast` używa prostszego shadingu, a `pbr` dodaje lekki PBR-like model z parametrami materiałów, roughness/metallic/wetness/specular, fresnelem, jasnością texela i bump/normal lighting wyliczanym z tekstur.
+- Bufory głębi: kolumnowy `z_buffer` dla klasycznych sprite'ów oraz pełny `depth_buffer` dla passów ekranowych, mgły, propsów 3D i efektów post-processingu.
+- Sortowanie billboardów od najdalszych do najbliższych: potwory, pickupy, projectiles, pochodnie/ogniska, cząstki, portale i drzewa są zasłaniane przez ściany przez `z_buffer`.
+- Wielokierunkowe animowane sprite'y potworów, osobne większe atlasy dla giant skeletona i bossa, skalowanie bossów/gigantów, pain flash, attack windup glow i hit rim.
+- Billboardy drzew, portali, relikwii, shrine'ów, złota, bone pile, pocisków, eksplozji, fireballi i boltów z przezroczystością przez magentę `#ff00ff`.
+- Pochodnie w dungeonach i ogniska w lesie renderowane jako proceduralne sprite'y płomienia z flickerem, poświatą, wkładem do `glow_buffer` i lokalnym wpływem na ściany, podłogę, sufit oraz mgłę.
+- Dynamiczne światło gracza i broni: player torch, muzzle flash, shot trace dla broni hitscan oraz glow/light od fireballi, eksplozji, relikwii i shrine'ów.
+- Eksperymentalna mgła wolumetryczna: dystansowy fog na ścianach, podłodze, suficie i sprite'ach oraz osobny animowany pass kłębiastej mgły/scatteringu po buforze świata. Mgła jest cięższa przy ziemi i w lesie unika bezpośredniego malowania na ścianach.
+- Dynamiczne cienie pod sprite'ami i obiektami świata.
+- Decale podłogowe z `assets/decals.ppm`, między innymi scorch marks po eksplozjach, rzutowane na perspektywiczną podłogę i mieszane z fogiem.
+- Decale ścienne z `assets/wall_decals.ppm`, indeksowane per kafel/strona ściany i aplikowane podczas renderowania kolumn ścian.
+- Kapliczki w lesie renderowane jako proste bryły z testem przecięcia promienia z boxem, teksturowanymi ścianami, osobnym rysowaniem dachów i szczytów oraz fogiem.
+- Wnętrza kapliczek mają proste 3D propsy: teksturowane boxy i walce, triangulowane w software, z podstawowym światłem powierzchni i testem `depth_buffer`.
+- Soft particles dla dymu/iskier z miękkim zanikiem przy przecięciu ze ścianami na podstawie `z_buffer`.
+- Leśny overlay pogodowy: subtelna deszczowa poświata i pionowe smugi deszczu nad sceną.
+- Opcjonalny light buffer/pseudo-deferred composite, threshold bloom z dwustopniowym blur buforem i trzema presetami intensywności post-processingu.
+- Opcjonalny selektywny edge antialiasing oparty o kontrast luminancji, nakładany tylko na świat gry.
+- Opcjonalny color grading z kontrastem, jasnością, tintem, LUT-like korekcją kanałów, vignette i osobnymi wariantami presetów; las ma własny chłodniejszy grading.
+- Efekty feedbacku: screen shake przez jitter kamery, czerwony hit flash na krawędziach ekranu, kierunkowy wskaźnik obrażeń, hit marker, recoil/bob i animowane sprite'y broni.
+- HUD i UI renderowane tym samym softwareowym rasterem: celownik, broń, shot trace, paski HP/ammo, relikwie, złoto, minimapa z fog-of-war, pełna automapa, prompt interakcji, menu, sklep, pauza, victory screen oraz overlay FPS/timing.
+- Profilowanie passów renderera pod `F4` i `--profile-dump`: total, floor, wall, sprite, fog, bloom i post.
+- Headless dumpy renderu: `make dump`, `--dump`, `--dump-house`, `--dump-quality` i `--profile-dump` zapisują deterministyczne klatki PPM do regresji.
+
+Cięższe passy post-processingu są przełączane przez `--effects full`, `--effects preset2`, `--effects preset3` albo w menu ustawień. Jakość renderu można ustawić przez `--quality pbr|fast` albo w menu.
 
 ## Build
 
