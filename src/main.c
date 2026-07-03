@@ -1134,6 +1134,174 @@ static void reset_render_buffers(void)
     }
 }
 
+#ifdef __EMSCRIPTEN__
+EM_JS(void, present_framebuffer_js, (int width, int height, int ptr), {
+    var canvas = Module.canvas || document.getElementById("canvas");
+    if (!canvas) return;
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    var ctx = Module.dioomCtx;
+    if (!ctx) {
+        ctx = canvas.getContext("2d");
+        Module.dioomCtx = ctx;
+    }
+    var image = Module.dioomImageData;
+    if (!image || image.width !== width || image.height !== height) {
+        image = ctx.createImageData(width, height);
+        Module.dioomImageData = image;
+    }
+    var src = HEAPU32.subarray(ptr >>> 2, (ptr >>> 2) + width * height);
+    var dst = new Uint32Array(image.data.buffer);
+    for (var i = 0; i < src.length; ++i) {
+        var c = src[i];
+        dst[i] = (c & 0xff00ff00) | ((c & 0x00ff0000) >>> 16) | ((c & 0x000000ff) << 16);
+    }
+    ctx.putImageData(image, 0, 0);
+});
+
+static void present_framebuffer_web(void)
+{
+    present_framebuffer_js(SCREEN_W, SCREEN_H, (int)(intptr_t)framebuffer);
+}
+
+enum {
+    WEB_INPUT_NONE = 0,
+    WEB_INPUT_W,
+    WEB_INPUT_S,
+    WEB_INPUT_A,
+    WEB_INPUT_D,
+    WEB_INPUT_Q,
+    WEB_INPUT_E,
+    WEB_INPUT_UP,
+    WEB_INPUT_DOWN,
+    WEB_INPUT_LEFT,
+    WEB_INPUT_RIGHT,
+    WEB_INPUT_ENTER,
+    WEB_INPUT_SPACE,
+    WEB_INPUT_ESCAPE,
+    WEB_INPUT_1,
+    WEB_INPUT_2,
+    WEB_INPUT_3,
+    WEB_INPUT_TAB,
+    WEB_INPUT_H,
+    WEB_INPUT_P,
+    WEB_INPUT_R,
+    WEB_INPUT_F,
+    WEB_INPUT_F3,
+    WEB_INPUT_F4,
+    WEB_INPUT_F8,
+    WEB_INPUT_F9,
+    WEB_INPUT_F11
+};
+
+EM_JS(void, web_input_init, (void), {
+    if (Module.dioomInputReady) {
+        return;
+    }
+    Module.dioomInputReady = true;
+    Module.dioomKeys = Object.create(null);
+    Module.dioomKeyQueue = [];
+    const mapCode = function(code) {
+        switch (code) {
+        case 'KeyW': return 1;
+        case 'KeyS': return 2;
+        case 'KeyA': return 3;
+        case 'KeyD': return 4;
+        case 'KeyQ': return 5;
+        case 'KeyE': return 6;
+        case 'ArrowUp': return 7;
+        case 'ArrowDown': return 8;
+        case 'ArrowLeft': return 9;
+        case 'ArrowRight': return 10;
+        case 'Enter':
+        case 'NumpadEnter': return 11;
+        case 'Space': return 12;
+        case 'Escape': return 13;
+        case 'Digit1': return 14;
+        case 'Digit2': return 15;
+        case 'Digit3': return 16;
+        case 'Tab': return 17;
+        case 'KeyH': return 18;
+        case 'KeyP': return 19;
+        case 'KeyR': return 20;
+        case 'KeyF': return 21;
+        case 'F3': return 22;
+        case 'F4': return 23;
+        case 'F8': return 24;
+        case 'F9': return 25;
+        case 'F11': return 26;
+        default: return 0;
+        }
+    };
+    const shouldCapture = function(id) {
+        return id !== 0;
+    };
+    window.addEventListener('keydown', function(event) {
+        const id = mapCode(event.code);
+        if (!shouldCapture(id)) {
+            return;
+        }
+        if (!event.repeat) {
+            Module.dioomKeyQueue.push(id);
+        }
+        Module.dioomKeys[id] = 1;
+        event.preventDefault();
+    }, { passive: false });
+    window.addEventListener('keyup', function(event) {
+        const id = mapCode(event.code);
+        if (!shouldCapture(id)) {
+            return;
+        }
+        Module.dioomKeys[id] = 0;
+        event.preventDefault();
+    }, { passive: false });
+});
+
+EM_JS(int, web_poll_keydown_id, (void), {
+    if (!Module.dioomInputReady) {
+        return 0;
+    }
+    return Module.dioomKeyQueue.length ? Module.dioomKeyQueue.shift() : 0;
+});
+
+EM_JS(int, web_key_down_id, (int id), {
+    return Module.dioomInputReady && Module.dioomKeys[id] ? 1 : 0;
+});
+
+static SDL_Keycode web_input_keycode(int id)
+{
+    switch (id) {
+    case WEB_INPUT_W: return SDLK_w;
+    case WEB_INPUT_S: return SDLK_s;
+    case WEB_INPUT_A: return SDLK_a;
+    case WEB_INPUT_D: return SDLK_d;
+    case WEB_INPUT_Q: return SDLK_q;
+    case WEB_INPUT_E: return SDLK_e;
+    case WEB_INPUT_UP: return SDLK_UP;
+    case WEB_INPUT_DOWN: return SDLK_DOWN;
+    case WEB_INPUT_LEFT: return SDLK_LEFT;
+    case WEB_INPUT_RIGHT: return SDLK_RIGHT;
+    case WEB_INPUT_ENTER: return SDLK_RETURN;
+    case WEB_INPUT_SPACE: return SDLK_SPACE;
+    case WEB_INPUT_ESCAPE: return SDLK_ESCAPE;
+    case WEB_INPUT_1: return SDLK_1;
+    case WEB_INPUT_2: return SDLK_2;
+    case WEB_INPUT_3: return SDLK_3;
+    case WEB_INPUT_TAB: return SDLK_TAB;
+    case WEB_INPUT_H: return SDLK_h;
+    case WEB_INPUT_P: return SDLK_p;
+    case WEB_INPUT_R: return SDLK_r;
+    case WEB_INPUT_F: return SDLK_f;
+    case WEB_INPUT_F3: return SDLK_F3;
+    case WEB_INPUT_F4: return SDLK_F4;
+    case WEB_INPUT_F8: return SDLK_F8;
+    case WEB_INPUT_F9: return SDLK_F9;
+    case WEB_INPUT_F11: return SDLK_F11;
+    default: return SDLK_UNKNOWN;
+    }
+}
+#endif
+
 static void wrap_audio_phase(double *phase)
 {
     double cycle = M_PI * 2.0;
@@ -8275,6 +8443,7 @@ static void select_weapon(GameState *game, int weapon)
     game->selected_weapon = weapon;
 }
 
+#ifndef __EMSCRIPTEN__
 static int weapon_available(const GameState *game, int weapon)
 {
     if (weapon == WEAPON_KNIFE) return 1;
@@ -8303,6 +8472,7 @@ static void cycle_weapon(GameState *game, int dir)
         }
     }
 }
+#endif
 
 static int portal_matches(const Portal *portal, int tx, int ty, int px, int py)
 {
@@ -12000,12 +12170,16 @@ static void set_runtime_relative_mouse(Runtime *rt, int enabled)
     if (rt->relative_mouse == enabled) {
         return;
     }
+#ifdef __EMSCRIPTEN__
+    rt->relative_mouse = enabled;
+#else
     if (SDL_SetRelativeMouseMode(enabled ? SDL_TRUE : SDL_FALSE) != 0) {
         fprintf(stderr, "warning: SDL_SetRelativeMouseMode failed: %s\n", SDL_GetError());
         return;
     }
     rt->relative_mouse = enabled;
     SDL_ShowCursor(enabled ? SDL_DISABLE : SDL_ENABLE);
+#endif
 }
 
 static SaveGameHeader savegame_header(uint64_t saved_at)
@@ -12456,8 +12630,13 @@ static const char *render_effects_config_text(int effects)
 
 static void init_runtime_config_defaults(RuntimeConfig *config)
 {
+#ifdef __EMSCRIPTEN__
+    config->window_w = SCREEN_W;
+    config->window_h = SCREEN_H;
+#else
     config->window_w = SCREEN_W * WINDOW_SCALE;
     config->window_h = SCREEN_H * WINDOW_SCALE;
+#endif
     config->integer_scale = 0;
     config->render_quality = DEFAULT_RENDER_QUALITY;
     config->render_effects = DEFAULT_RENDER_EFFECTS;
@@ -12647,10 +12826,33 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
         return 0;
     }
 
+#ifdef __EMSCRIPTEN__
+    SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
+    SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "0");
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
+    SDL_SetHint(SDL_HINT_GAMECONTROLLERCONFIG, "");
+    SDL_SetHint(SDL_HINT_GAMECONTROLLERCONFIG_FILE, "");
+#endif
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 0;
     }
+#ifdef __EMSCRIPTEN__
+    SDL_EventState(SDL_JOYAXISMOTION, SDL_IGNORE);
+    SDL_EventState(SDL_JOYBALLMOTION, SDL_IGNORE);
+    SDL_EventState(SDL_JOYHATMOTION, SDL_IGNORE);
+    SDL_EventState(SDL_JOYBUTTONDOWN, SDL_IGNORE);
+    SDL_EventState(SDL_JOYBUTTONUP, SDL_IGNORE);
+    SDL_EventState(SDL_JOYDEVICEADDED, SDL_IGNORE);
+    SDL_EventState(SDL_JOYDEVICEREMOVED, SDL_IGNORE);
+    SDL_EventState(SDL_CONTROLLERAXISMOTION, SDL_IGNORE);
+    SDL_EventState(SDL_CONTROLLERBUTTONDOWN, SDL_IGNORE);
+    SDL_EventState(SDL_CONTROLLERBUTTONUP, SDL_IGNORE);
+    SDL_EventState(SDL_CONTROLLERDEVICEADDED, SDL_IGNORE);
+    SDL_EventState(SDL_CONTROLLERDEVICEREMOVED, SDL_IGNORE);
+    SDL_EventState(SDL_CONTROLLERDEVICEREMAPPED, SDL_IGNORE);
+#endif
     if (!init_audio()) {
         SDL_Quit();
         return 0;
@@ -12658,13 +12860,17 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, config->scale_quality);
 
+    Uint32 window_flags = SDL_WINDOW_SHOWN;
+#ifndef __EMSCRIPTEN__
+    window_flags |= SDL_WINDOW_RESIZABLE;
+#endif
     rt->window = SDL_CreateWindow(
         "Dioom",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         config->window_w,
         config->window_h,
-        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+        window_flags);
     if (!rt->window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         shutdown_audio();
@@ -12672,10 +12878,12 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
         return 0;
     }
 
+#ifndef __EMSCRIPTEN__
+    Uint32 renderer_flags = SDL_RENDERER_SOFTWARE | SDL_RENDERER_PRESENTVSYNC;
     rt->renderer = SDL_CreateRenderer(
         rt->window,
         -1,
-        SDL_RENDERER_SOFTWARE | SDL_RENDERER_PRESENTVSYNC);
+        renderer_flags);
     if (!rt->renderer) {
         fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
         shutdown_runtime(rt);
@@ -12695,6 +12903,7 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
         shutdown_runtime(rt);
         return 0;
     }
+#endif
 
     rt->running = 1;
     rt->paused = 1;
@@ -12724,156 +12933,172 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
     reset_run(&rt->game, &rt->cam);
     rt->settings_ready = 1;
     rt->prev = SDL_GetPerformanceCounter();
+#ifdef __EMSCRIPTEN__
+    web_input_init();
+#endif
     return 1;
+}
+
+static void handle_runtime_keydown(Runtime *rt, SDL_Keycode key, int repeat)
+{
+    if (rt->shop_open) {
+        if ((key == SDLK_w || key == SDLK_UP) && repeat == 0) {
+            rt->shop_selected = (rt->shop_selected + SHOP_ITEM_COUNT - 1) % SHOP_ITEM_COUNT;
+        } else if ((key == SDLK_s || key == SDLK_DOWN) && repeat == 0) {
+            rt->shop_selected = (rt->shop_selected + 1) % SHOP_ITEM_COUNT;
+        } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE) && repeat == 0) {
+            activate_merchant_shop_item(rt);
+        } else if ((key == SDLK_ESCAPE || key == SDLK_e) && repeat == 0) {
+            close_merchant_shop(rt);
+            play_sfx(SFX_DOOR, 0.30);
+        }
+        return;
+    }
+    int help_closed = rt->menu_open ? 0 : close_help_on_key(&rt->game);
+    if (rt->menu_open) {
+        int menu_count = menu_item_count_for_page(rt->menu_page);
+        if ((key == SDLK_w || key == SDLK_UP) && repeat == 0) {
+            rt->menu_selected = (rt->menu_selected + menu_count - 1) % menu_count;
+        } else if ((key == SDLK_s || key == SDLK_DOWN) && repeat == 0) {
+            rt->menu_selected = (rt->menu_selected + 1) % menu_count;
+        } else if (rt->menu_page == MENU_PAGE_SETTINGS &&
+                   (key == SDLK_a || key == SDLK_LEFT || key == SDLK_d || key == SDLK_RIGHT) &&
+                   repeat == 0) {
+            int delta = (key == SDLK_a || key == SDLK_LEFT) ? -1 : 1;
+            adjust_runtime_settings_item(rt, rt->menu_selected, delta);
+        } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE) && repeat == 0) {
+            if (rt->menu_page == MENU_PAGE_SETTINGS) {
+                if (rt->menu_selected == SETTINGS_MENU_ITEM_BACK) {
+                    close_settings_menu(rt);
+                } else {
+                    adjust_runtime_settings_item(rt, rt->menu_selected, 1);
+                }
+            } else if (rt->menu_page == MENU_PAGE_SAVE || rt->menu_page == MENU_PAGE_LOAD) {
+                if (rt->menu_selected == SLOT_MENU_ITEM_BACK) {
+                    close_slot_menu(rt);
+                } else if (rt->menu_page == MENU_PAGE_SAVE) {
+                    play_sfx(save_runtime_game(rt, rt->menu_selected) ? SFX_PICKUP : SFX_LOCKED, 0.48);
+                } else {
+                    play_sfx(load_runtime_game(rt, rt->menu_selected) ? SFX_PORTAL : SFX_LOCKED, 0.48);
+                }
+            } else {
+                if (rt->menu_selected == MAIN_MENU_ITEM_PLAY) {
+                    if (!rt->game_started) {
+                        reset_run(&rt->game, &rt->cam);
+                    }
+                    rt->menu_open = 0;
+                    rt->paused = 0;
+                    rt->game_started = 1;
+                } else if (rt->menu_selected == MAIN_MENU_ITEM_RESTART) {
+                    reset_run(&rt->game, &rt->cam);
+                    rt->menu_open = 0;
+                    rt->paused = 0;
+                    rt->game_started = 1;
+                } else if (rt->menu_selected == MAIN_MENU_ITEM_SAVE) {
+                    open_save_menu(rt);
+                } else if (rt->menu_selected == MAIN_MENU_ITEM_LOAD) {
+                    open_load_menu(rt);
+                } else if (rt->menu_selected == MAIN_MENU_ITEM_SETTINGS) {
+                    open_settings_menu(rt);
+                } else if (rt->menu_selected == MAIN_MENU_ITEM_EXIT) {
+                    rt->running = 0;
+                }
+            }
+        } else if (key == SDLK_ESCAPE && repeat == 0) {
+            if (rt->menu_page == MENU_PAGE_SETTINGS) {
+                close_settings_menu(rt);
+            } else if (rt->menu_page == MENU_PAGE_SAVE || rt->menu_page == MENU_PAGE_LOAD) {
+                close_slot_menu(rt);
+            } else if (rt->game_started) {
+                rt->menu_open = 0;
+                rt->paused = 0;
+            }
+        } else if (key == SDLK_F3 && repeat == 0) {
+            rt->show_fps = !rt->show_fps;
+            rt->fps_accum = 0.0;
+            rt->fps_frames = 0;
+        } else if (key == SDLK_F4 && repeat == 0) {
+            rt->show_timings = !rt->show_timings;
+        } else if (key == SDLK_F11 && repeat == 0) {
+            if (!toggle_runtime_fullscreen(rt)) {
+                rt->running = 0;
+            }
+        } else if (key == SDLK_F8 && repeat == 0) {
+            open_save_menu(rt);
+        } else if (key == SDLK_F9 && repeat == 0) {
+            open_load_menu(rt);
+        }
+        return;
+    }
+    if (key == SDLK_ESCAPE) {
+        open_main_menu(rt);
+    } else if (key == SDLK_1) {
+        select_weapon(&rt->game, WEAPON_KNIFE);
+    } else if (key == SDLK_2) {
+        select_weapon(&rt->game, WEAPON_PISTOL);
+    } else if (key == SDLK_3 && repeat == 0) {
+        select_weapon(&rt->game, WEAPON_FIREBALL);
+    } else if (key == SDLK_SPACE) {
+        if (!rt->paused) {
+            player_fire(&rt->game, &rt->cam);
+        }
+    } else if (key == SDLK_f) {
+        if (!rt->paused) {
+            interact_world(&rt->game, &rt->cam);
+        }
+    } else if (key == SDLK_e && repeat == 0) {
+        if (!rt->paused && active_merchant_house_prompt(&rt->game, &rt->cam)) {
+            open_merchant_shop(rt);
+            play_sfx(SFX_DOOR, 0.36);
+        }
+    } else if (key == SDLK_TAB && repeat == 0) {
+        rt->game.show_automap = !rt->game.show_automap;
+    } else if (key == SDLK_h && repeat == 0) {
+        if (!help_closed) {
+            rt->game.show_help = 1;
+            rt->game.help_timer = 0.0;
+        }
+    } else if (key == SDLK_p && repeat == 0) {
+        rt->paused = !rt->paused;
+    } else if (key == SDLK_r && repeat == 0) {
+        reset_run(&rt->game, &rt->cam);
+        rt->paused = 0;
+        rt->game_started = 1;
+    } else if (key == SDLK_F3 && repeat == 0) {
+        rt->show_fps = !rt->show_fps;
+        rt->fps_accum = 0.0;
+        rt->fps_frames = 0;
+    } else if (key == SDLK_F4 && repeat == 0) {
+        rt->show_timings = !rt->show_timings;
+    } else if (key == SDLK_F11 && repeat == 0) {
+        if (!toggle_runtime_fullscreen(rt)) {
+            rt->running = 0;
+        }
+    } else if (key == SDLK_F8 && repeat == 0) {
+        open_save_menu(rt);
+    } else if (key == SDLK_F9 && repeat == 0) {
+        open_load_menu(rt);
+    }
 }
 
 static void runtime_frame(void *userdata)
 {
     Runtime *rt = (Runtime *)userdata;
+#ifdef __EMSCRIPTEN__
+    int web_key_id = WEB_INPUT_NONE;
+    while ((web_key_id = web_poll_keydown_id()) != WEB_INPUT_NONE) {
+        SDL_Keycode key = web_input_keycode(web_key_id);
+        if (key != SDLK_UNKNOWN) {
+            handle_runtime_keydown(rt, key, 0);
+        }
+    }
+#else
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_QUIT) {
             rt->running = 0;
         } else if (event.type == SDL_KEYDOWN) {
-            SDL_Keycode key = event.key.keysym.sym;
-            if (rt->shop_open) {
-                if ((key == SDLK_w || key == SDLK_UP) && event.key.repeat == 0) {
-                    rt->shop_selected = (rt->shop_selected + SHOP_ITEM_COUNT - 1) % SHOP_ITEM_COUNT;
-                } else if ((key == SDLK_s || key == SDLK_DOWN) && event.key.repeat == 0) {
-                    rt->shop_selected = (rt->shop_selected + 1) % SHOP_ITEM_COUNT;
-                } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE) && event.key.repeat == 0) {
-                    activate_merchant_shop_item(rt);
-                } else if ((key == SDLK_ESCAPE || key == SDLK_e) && event.key.repeat == 0) {
-                    close_merchant_shop(rt);
-                    play_sfx(SFX_DOOR, 0.30);
-                }
-                continue;
-            }
-            int help_closed = rt->menu_open ? 0 : close_help_on_key(&rt->game);
-            if (rt->menu_open) {
-                int menu_count = menu_item_count_for_page(rt->menu_page);
-                if ((key == SDLK_w || key == SDLK_UP) && event.key.repeat == 0) {
-                    rt->menu_selected = (rt->menu_selected + menu_count - 1) % menu_count;
-                } else if ((key == SDLK_s || key == SDLK_DOWN) && event.key.repeat == 0) {
-                    rt->menu_selected = (rt->menu_selected + 1) % menu_count;
-                } else if (rt->menu_page == MENU_PAGE_SETTINGS &&
-                           (key == SDLK_a || key == SDLK_LEFT || key == SDLK_d || key == SDLK_RIGHT) &&
-                           event.key.repeat == 0) {
-                    int delta = (key == SDLK_a || key == SDLK_LEFT) ? -1 : 1;
-                    adjust_runtime_settings_item(rt, rt->menu_selected, delta);
-                } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE) && event.key.repeat == 0) {
-                    if (rt->menu_page == MENU_PAGE_SETTINGS) {
-                        if (rt->menu_selected == SETTINGS_MENU_ITEM_BACK) {
-                            close_settings_menu(rt);
-                        } else {
-                            adjust_runtime_settings_item(rt, rt->menu_selected, 1);
-                        }
-                    } else if (rt->menu_page == MENU_PAGE_SAVE || rt->menu_page == MENU_PAGE_LOAD) {
-                        if (rt->menu_selected == SLOT_MENU_ITEM_BACK) {
-                            close_slot_menu(rt);
-                        } else if (rt->menu_page == MENU_PAGE_SAVE) {
-                            play_sfx(save_runtime_game(rt, rt->menu_selected) ? SFX_PICKUP : SFX_LOCKED, 0.48);
-                        } else {
-                            play_sfx(load_runtime_game(rt, rt->menu_selected) ? SFX_PORTAL : SFX_LOCKED, 0.48);
-                        }
-                    } else {
-                        if (rt->menu_selected == MAIN_MENU_ITEM_PLAY) {
-                            if (!rt->game_started) {
-                                reset_run(&rt->game, &rt->cam);
-                            }
-                            rt->menu_open = 0;
-                            rt->paused = 0;
-                            rt->game_started = 1;
-                        } else if (rt->menu_selected == MAIN_MENU_ITEM_RESTART) {
-                            reset_run(&rt->game, &rt->cam);
-                            rt->menu_open = 0;
-                            rt->paused = 0;
-                            rt->game_started = 1;
-                        } else if (rt->menu_selected == MAIN_MENU_ITEM_SAVE) {
-                            open_save_menu(rt);
-                        } else if (rt->menu_selected == MAIN_MENU_ITEM_LOAD) {
-                            open_load_menu(rt);
-                        } else if (rt->menu_selected == MAIN_MENU_ITEM_SETTINGS) {
-                            open_settings_menu(rt);
-                        } else if (rt->menu_selected == MAIN_MENU_ITEM_EXIT) {
-                            rt->running = 0;
-                        }
-                    }
-                } else if (key == SDLK_ESCAPE && event.key.repeat == 0) {
-                    if (rt->menu_page == MENU_PAGE_SETTINGS) {
-                        close_settings_menu(rt);
-                    } else if (rt->menu_page == MENU_PAGE_SAVE || rt->menu_page == MENU_PAGE_LOAD) {
-                        close_slot_menu(rt);
-                    } else if (rt->game_started) {
-                        rt->menu_open = 0;
-                        rt->paused = 0;
-                    }
-                } else if (key == SDLK_F3 && event.key.repeat == 0) {
-                    rt->show_fps = !rt->show_fps;
-                    rt->fps_accum = 0.0;
-                    rt->fps_frames = 0;
-                } else if (key == SDLK_F4 && event.key.repeat == 0) {
-                    rt->show_timings = !rt->show_timings;
-                } else if (key == SDLK_F11 && event.key.repeat == 0) {
-                    if (!toggle_runtime_fullscreen(rt)) {
-                        rt->running = 0;
-                    }
-                } else if (key == SDLK_F8 && event.key.repeat == 0) {
-                    open_save_menu(rt);
-                } else if (key == SDLK_F9 && event.key.repeat == 0) {
-                    open_load_menu(rt);
-                }
-                continue;
-            }
-            if (key == SDLK_ESCAPE) {
-                open_main_menu(rt);
-            } else if (key == SDLK_1) {
-                select_weapon(&rt->game, WEAPON_KNIFE);
-            } else if (key == SDLK_2) {
-                select_weapon(&rt->game, WEAPON_PISTOL);
-            } else if (key == SDLK_3 && event.key.repeat == 0) {
-                select_weapon(&rt->game, WEAPON_FIREBALL);
-            } else if (key == SDLK_SPACE) {
-                if (!rt->paused) {
-                    player_fire(&rt->game, &rt->cam);
-                }
-            } else if (key == SDLK_f) {
-                if (!rt->paused) {
-                    interact_world(&rt->game, &rt->cam);
-                }
-            } else if (key == SDLK_e && event.key.repeat == 0) {
-                if (!rt->paused && active_merchant_house_prompt(&rt->game, &rt->cam)) {
-                    open_merchant_shop(rt);
-                    play_sfx(SFX_DOOR, 0.36);
-                }
-            } else if (key == SDLK_TAB && event.key.repeat == 0) {
-                rt->game.show_automap = !rt->game.show_automap;
-            } else if (key == SDLK_h && event.key.repeat == 0) {
-                if (!help_closed) {
-                    rt->game.show_help = 1;
-                    rt->game.help_timer = 0.0;
-                }
-            } else if (key == SDLK_p && event.key.repeat == 0) {
-                rt->paused = !rt->paused;
-            } else if (key == SDLK_r && event.key.repeat == 0) {
-                reset_run(&rt->game, &rt->cam);
-                rt->paused = 0;
-                rt->game_started = 1;
-            } else if (key == SDLK_F3 && event.key.repeat == 0) {
-                rt->show_fps = !rt->show_fps;
-                rt->fps_accum = 0.0;
-                rt->fps_frames = 0;
-            } else if (key == SDLK_F4 && event.key.repeat == 0) {
-                rt->show_timings = !rt->show_timings;
-            } else if (key == SDLK_F11 && event.key.repeat == 0) {
-                if (!toggle_runtime_fullscreen(rt)) {
-                    rt->running = 0;
-                }
-            } else if (key == SDLK_F8 && event.key.repeat == 0) {
-                open_save_menu(rt);
-            } else if (key == SDLK_F9 && event.key.repeat == 0) {
-                open_load_menu(rt);
-            }
+            handle_runtime_keydown(rt, event.key.keysym.sym, event.key.repeat);
         } else if (event.type == SDL_MOUSEMOTION) {
             if (!rt->paused && !rt->menu_open && !rt->shop_open && rt->game_started && !rt->game.game_over) {
                 rotate_camera(&rt->cam, event.motion.xrel * 0.0024);
@@ -12888,6 +13113,7 @@ static void runtime_frame(void *userdata)
             }
         }
     }
+#endif
 
     if (!rt->running) {
 #ifdef __EMSCRIPTEN__
@@ -12918,17 +13144,26 @@ static void runtime_frame(void *userdata)
         dt = 0.05;
     }
 
-    const uint8_t *keys = SDL_GetKeyboardState(NULL);
     double forward = 0.0;
     double strafe = 0.0;
     double turn = 0.0;
 
+#ifdef __EMSCRIPTEN__
+    if (web_key_down_id(WEB_INPUT_W) || web_key_down_id(WEB_INPUT_UP)) forward += 1.0;
+    if (web_key_down_id(WEB_INPUT_S) || web_key_down_id(WEB_INPUT_DOWN)) forward -= 1.0;
+    if (web_key_down_id(WEB_INPUT_A) || web_key_down_id(WEB_INPUT_Q)) strafe -= 1.0;
+    if (web_key_down_id(WEB_INPUT_D) || web_key_down_id(WEB_INPUT_E)) strafe += 1.0;
+    if (web_key_down_id(WEB_INPUT_LEFT)) turn -= 1.0;
+    if (web_key_down_id(WEB_INPUT_RIGHT)) turn += 1.0;
+#else
+    const uint8_t *keys = SDL_GetKeyboardState(NULL);
     if (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) forward += 1.0;
     if (keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN]) forward -= 1.0;
     if (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_Q]) strafe -= 1.0;
     if (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_E]) strafe += 1.0;
     if (keys[SDL_SCANCODE_LEFT]) turn -= 1.0;
     if (keys[SDL_SCANCODE_RIGHT]) turn += 1.0;
+#endif
 
     if (!rt->paused && !rt->menu_open && !rt->game.game_over && (forward != 0.0 || strafe != 0.0)) {
         move_camera(&rt->cam, &rt->game, forward, strafe, dt);
@@ -12970,11 +13205,15 @@ static void runtime_frame(void *userdata)
     if (rt->show_timings) {
         render_timing_overlay(&rt->profile);
     }
+#ifdef __EMSCRIPTEN__
+    present_framebuffer_web();
+#else
     SDL_UpdateTexture(rt->screen, NULL, framebuffer, SCREEN_W * (int)sizeof(uint32_t));
 
     SDL_RenderClear(rt->renderer);
     SDL_RenderCopy(rt->renderer, rt->screen, NULL, NULL);
     SDL_RenderPresent(rt->renderer);
+#endif
 }
 
 int main(int argc, char **argv)
