@@ -12768,10 +12768,6 @@ static void runtime_frame(void *userdata)
                     rt->fps_frames = 0;
                 } else if (key == SDLK_F4 && event.key.repeat == 0) {
                     rt->show_timings = !rt->show_timings;
-                } else if (key == SDLK_F5 && event.key.repeat == 0) {
-                    toggle_runtime_render_quality(rt);
-                } else if (key == SDLK_F6 && event.key.repeat == 0) {
-                    cycle_runtime_render_effects(rt, 1);
                 } else if (key == SDLK_F11 && event.key.repeat == 0) {
                     if (!toggle_runtime_fullscreen(rt)) {
                         rt->running = 0;
@@ -12791,26 +12787,6 @@ static void runtime_frame(void *userdata)
                 select_weapon(&rt->game, WEAPON_PISTOL);
             } else if (key == SDLK_3 && event.key.repeat == 0) {
                 select_weapon(&rt->game, WEAPON_FIREBALL);
-            } else if (key == SDLK_4 && event.key.repeat == 0) {
-                runtime_level_mode = GENERATOR_ROOMS;
-                reset_run(&rt->game, &rt->cam);
-                rt->paused = 0;
-                rt->game_started = 1;
-            } else if (key == SDLK_5 && event.key.repeat == 0) {
-                runtime_level_mode = GENERATOR_TIGHT;
-                reset_run(&rt->game, &rt->cam);
-                rt->paused = 0;
-                rt->game_started = 1;
-            } else if (key == SDLK_6 && event.key.repeat == 0) {
-                runtime_level_mode = GENERATOR_BOSS;
-                reset_run(&rt->game, &rt->cam);
-                rt->paused = 0;
-                rt->game_started = 1;
-            } else if (key == SDLK_7 && event.key.repeat == 0) {
-                runtime_level_mode = GENERATOR_FOREST;
-                reset_run(&rt->game, &rt->cam);
-                rt->paused = 0;
-                rt->game_started = 1;
             } else if (key == SDLK_SPACE) {
                 if (!rt->paused) {
                     player_fire(&rt->game, &rt->cam);
@@ -12843,10 +12819,6 @@ static void runtime_frame(void *userdata)
                 rt->fps_frames = 0;
             } else if (key == SDLK_F4 && event.key.repeat == 0) {
                 rt->show_timings = !rt->show_timings;
-            } else if (key == SDLK_F5 && event.key.repeat == 0) {
-                toggle_runtime_render_quality(rt);
-            } else if (key == SDLK_F6 && event.key.repeat == 0) {
-                cycle_runtime_render_effects(rt, 1);
             } else if (key == SDLK_F11 && event.key.repeat == 0) {
                 if (!toggle_runtime_fullscreen(rt)) {
                     rt->running = 0;
