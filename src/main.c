@@ -841,8 +841,10 @@ static double glow_blur_buffer[SCREEN_W * SCREEN_H];
 static double bloom_work_buffer[SCREEN_W * SCREEN_H];
 static double light_buffer[SCREEN_W * SCREEN_H];
 static uint32_t post_buffer[SCREEN_W * SCREEN_H];
-static double post_luma_buffer[SCREEN_W * (SCREEN_H - 14)];
+static uint8_t post_luma_buffer[SCREEN_W * (SCREEN_H - 14)];
 static double vignette_buffer[SCREEN_W * (SCREEN_H - 14)];
+static uint8_t color_grade_lut[RENDER_EFFECTS_COUNT][3][256][256];
+static int color_grade_lut_ready = 0;
 static int vignette_ready = 0;
 static double fog_lut[FOG_LUT_SIZE + 1];
 static double forest_fog_lut[FOG_LUT_SIZE + 1];
@@ -1005,6 +1007,22 @@ static double luminance(uint32_t color)
     double g = (double)((color >> 8) & 0xFFu);
     double b = (double)(color & 0xFFu);
     return (r * 0.2126 + g * 0.7152 + b * 0.0722) / 255.0;
+}
+
+static uint8_t luma_u8(uint32_t color)
+{
+    int r = (int)((color >> 16) & 0xFFu);
+    int g = (int)((color >> 8) & 0xFFu);
+    int b = (int)(color & 0xFFu);
+    return (uint8_t)((r * 54 + g * 183 + b * 19 + 128) >> 8);
+}
+
+static uint8_t color_grade_luma_u8(uint32_t color)
+{
+    int r = (int)((color >> 16) & 0xFFu);
+    int g = (int)((color >> 8) & 0xFFu);
+    int b = (int)(color & 0xFFu);
+    return (uint8_t)((r * 19595 + g * 38470 + b * 7471 + 32768) >> 16);
 }
 
 static uint32_t add_color(uint32_t color, uint32_t add, double amount);
@@ -4156,20 +4174,20 @@ static void render_edge_antialias(void)
     int pixels = SCREEN_W * (SCREEN_H - 14);
     for (int i = 0; i < pixels; ++i) {
         post_buffer[i] = framebuffer[i];
-        post_luma_buffer[i] = luminance(framebuffer[i]);
+        post_luma_buffer[i] = luma_u8(framebuffer[i]);
     }
 
     for (int y = 1; y < SCREEN_H - 15; ++y) {
         for (int x = 1; x < SCREEN_W - 1; ++x) {
             int idx = y * SCREEN_W + x;
             uint32_t c = framebuffer[idx];
-            double lc = post_luma_buffer[idx];
-            double ll = post_luma_buffer[idx - 1];
-            double lr = post_luma_buffer[idx + 1];
-            double lu = post_luma_buffer[idx - SCREEN_W];
-            double ld = post_luma_buffer[idx + SCREEN_W];
-            double lmin = lc;
-            double lmax = lc;
+            int lc = post_luma_buffer[idx];
+            int ll = post_luma_buffer[idx - 1];
+            int lr = post_luma_buffer[idx + 1];
+            int lu = post_luma_buffer[idx - SCREEN_W];
+            int ld = post_luma_buffer[idx + SCREEN_W];
+            int lmin = lc;
+            int lmax = lc;
             if (ll < lmin) lmin = ll;
             if (lr < lmin) lmin = lr;
             if (lu < lmin) lmin = lu;
@@ -4179,20 +4197,20 @@ static void render_edge_antialias(void)
             if (lu > lmax) lmax = lu;
             if (ld > lmax) lmax = ld;
 
-            double contrast = lmax - lmin;
-            if (contrast < 0.11) {
+            int contrast = lmax - lmin;
+            if (contrast <= 28) {
                 continue;
             }
-            if (lc > 0.84 && contrast > 0.45) {
+            if (lc > 214 && contrast > 115) {
                 continue;
             }
 
-            double horizontal_delta = fabs(ll - lr);
-            double vertical_delta = fabs(lu - ld);
+            int horizontal_delta = abs(ll - lr);
+            int vertical_delta = abs(lu - ld);
             uint32_t target = horizontal_delta < vertical_delta
                 ? mix_color(framebuffer[idx - 1], framebuffer[idx + 1], 0.5)
                 : mix_color(framebuffer[idx - SCREEN_W], framebuffer[idx + SCREEN_W], 0.5);
-            double amount = clamp01((contrast - 0.11) * 1.45);
+            double amount = ((double)contrast / 255.0 - 0.11) * 1.45;
             if (amount > 0.34) {
                 amount = 0.34;
             }
@@ -4222,34 +4240,59 @@ static uint8_t lut_channel(double value)
     return clamp_u8((int)(value * 255.0 + 0.5));
 }
 
-static uint32_t apply_color_lut(uint32_t color, int effects)
+static double color_grade_channel_value(int effects, int channel, double value, double luma)
 {
-    double r = ((color >> 16) & 0xFFu) / 255.0;
-    double g = ((color >> 8) & 0xFFu) / 255.0;
-    double b = (color & 0xFFu) / 255.0;
-    double l = r * 0.299 + g * 0.587 + b * 0.114;
-
     switch (normalize_render_effects(effects)) {
     case RENDER_EFFECTS_PRESET1:
-        r = pow(clamp01(r * 1.06 + l * 0.025), 0.96);
-        g = pow(clamp01(g * 1.02 + l * 0.018), 0.98);
-        b = pow(clamp01(b * 0.96 + l * 0.010), 1.03);
-        break;
+        if (channel == 0) return pow(clamp01(value * 1.06 + luma * 0.025), 0.96);
+        if (channel == 1) return pow(clamp01(value * 1.02 + luma * 0.018), 0.98);
+        return pow(clamp01(value * 0.96 + luma * 0.010), 1.03);
     case RENDER_EFFECTS_PRESET2:
-        r = pow(clamp01(r * 0.88 + l * 0.035), 1.08);
-        g = pow(clamp01(g * 1.00 + l * 0.025), 1.00);
-        b = pow(clamp01(b * 1.14 + l * 0.030), 0.94);
-        break;
+        if (channel == 0) return pow(clamp01(value * 0.88 + luma * 0.035), 1.08);
+        if (channel == 1) return clamp01(value * 1.00 + luma * 0.025);
+        return pow(clamp01(value * 1.14 + luma * 0.030), 0.94);
     case RENDER_EFFECTS_PRESET3:
-        r = pow(clamp01(r * 1.18 + l * 0.040), 0.90);
-        g = pow(clamp01(g * 0.94 + l * 0.020), 1.02);
-        b = pow(clamp01(b * 0.82 + l * 0.010), 1.12);
-        break;
+        if (channel == 0) return pow(clamp01(value * 1.18 + luma * 0.040), 0.90);
+        if (channel == 1) return pow(clamp01(value * 0.94 + luma * 0.020), 1.02);
+        return pow(clamp01(value * 0.82 + luma * 0.010), 1.12);
     default:
-        break;
+        return value;
+    }
+}
+
+static void build_color_grade_lut(void)
+{
+    for (int effects = RENDER_EFFECTS_PRESET1; effects < RENDER_EFFECTS_COUNT; ++effects) {
+        for (int channel = 0; channel < 3; ++channel) {
+            for (int luma = 0; luma < 256; ++luma) {
+                double l = luma / 255.0;
+                for (int value = 0; value < 256; ++value) {
+                    color_grade_lut[effects][channel][luma][value] =
+                        lut_channel(color_grade_channel_value(effects, channel, value / 255.0, l));
+                }
+            }
+        }
+    }
+    color_grade_lut_ready = 1;
+}
+
+static uint32_t apply_color_lut(uint32_t color, int effects)
+{
+    effects = normalize_render_effects(effects);
+    if (effects == RENDER_EFFECTS_OFF) {
+        return color;
+    }
+    if (!color_grade_lut_ready) {
+        build_color_grade_lut();
     }
 
-    return rgb(lut_channel(r), lut_channel(g), lut_channel(b));
+    int r = (int)((color >> 16) & 0xFFu);
+    int g = (int)((color >> 8) & 0xFFu);
+    int b = (int)(color & 0xFFu);
+    int luma = color_grade_luma_u8(color);
+    return rgb(color_grade_lut[effects][0][luma][r],
+               color_grade_lut[effects][1][luma][g],
+               color_grade_lut[effects][2][luma][b]);
 }
 
 static void render_muzzle_light(const GameState *game)
@@ -5723,6 +5766,9 @@ static void render_scene(const Camera *cam, const GameState *game)
     RenderProfile *profile = active_profile;
     uint64_t total_start = 0;
     uint64_t pass_start = 0;
+    if (render_effects != RENDER_EFFECTS_OFF && !color_grade_lut_ready) {
+        build_color_grade_lut();
+    }
     if (profile) {
         memset(profile, 0, sizeof(*profile));
         total_start = SDL_GetPerformanceCounter();
