@@ -1,0 +1,7 @@
+build/
+winuae/*.local.uae
+winuae/*.log
+winuae/*.tmp
+*.o
+*.map
+
