@@ -1,62 +1,62 @@
 # Dioom
 
-Dioom to minimalny raycaster w C w stylu Wolfensteina. Cała scena jest renderowana softwareowo do bufora `uint32_t`, a SDL2 służy tylko do okna, inputu, audio i pokazania gotowej tekstury.
+Dioom is a minimal Wolfenstein-style raycaster written in C. The whole scene is rendered in software into a `uint32_t` framebuffer, while SDL2 is used only for the window, input, audio, and presenting the finished texture.
 
-Tekstury ścian, podłogi i sufitu są ładowane z `assets/textures.ppm`: atlas 4x2, osiem kafli po 64x64 px. Aktualny zestaw miesza ciemny gotycki dungeon z kaflami mrocznego lasu: ziemia, mech, korzenie, kora i czarny baldachim drzew. Brak lub błędny atlas kończy program błędem.
+Wall, floor, and ceiling textures are loaded from `assets/textures.ppm`: a 4x2 atlas with eight 64x64 tiles. The current set mixes a dark gothic dungeon with gloomy forest tiles: dirt, moss, roots, bark, and a black tree canopy. A missing or invalid atlas terminates the program with an error.
 
-Potwory są ładowane z `assets/monsters.ppm`: atlas 4x24, sześć typów przeciwników po cztery kierunki i cztery klatki animacji 64x64 px. W każdym bloku typu rzędy to front, prawy bok, tył i lewy bok. Front używa klatek idle/przygotowanie/atak/gest, a pozostałe kierunki traktują kolumny jako warianty chodzenia lub ruchu. Magenta `#ff00ff` jest traktowana jako kolor przezroczysty.
+Monsters are loaded from `assets/monsters.ppm`: a 4x24 atlas, six enemy types with four directions and four 64x64 animation frames each. In each type block, the rows are front, right side, back, and left side. The front row uses idle/windup/attack/gesture frames, while the other directions treat the columns as walking or movement variants. Magenta `#ff00ff` is treated as transparent.
 
-Wielki szkielet i boss są ładowane z osobnych atlasów 4x4: `assets/giant_skeleton.ppm` i `assets/boss.ppm`, cztery kierunki po cztery klatki animacji 128x128 px. Magenta `#ff00ff` jest przezroczysta. Brak atlasu kończy program błędem.
+The giant skeleton and boss are loaded from separate 4x4 atlases: `assets/giant_skeleton.ppm` and `assets/boss.ppm`, with four directions and four 128x128 animation frames. Magenta `#ff00ff` is transparent. A missing atlas terminates the program with an error.
 
-Drzewa lasu są ładowane z `assets/trees.ppm`: atlas 4x1, cztery warianty billboardów 64x64 px. Magenta `#ff00ff` jest przezroczysta. Brak atlasu kończy program błędem.
+Forest trees are loaded from `assets/trees.ppm`: a 4x1 atlas with four 64x64 billboard variants. Magenta `#ff00ff` is transparent. A missing atlas terminates the program with an error.
 
-Kapliczki cmentarne w lesie są ładowane z `assets/houses.ppm`: atlas 2x2 po 64x64 px dla frontu, boków, tyłu i dachu. Meble we wnętrzach kapliczek są prostymi teksturowanymi bryłami, a beczki teksturowanymi walcami. Ich powierzchnie są ładowane z `assets/furniture.ppm`: atlas 8x1, osiem kafli po 64x64 px. Brak któregoś atlasu kończy program błędem.
+Forest cemetery shrines are loaded from `assets/houses.ppm`: a 2x2 atlas with 64x64 tiles for the front, sides, back, and roof. Shrine interiors use simple textured boxes for furniture and textured cylinders for barrels. Their surfaces are loaded from `assets/furniture.ppm`: an 8x1 atlas with eight 64x64 tiles. A missing atlas terminates the program with an error.
 
-Relikwie kultu są ładowane z `assets/relics.ppm`: atlas 4x1, cztery sprity pickupów 32x32 px. Magenta `#ff00ff` jest przezroczysta. Brak atlasu kończy program błędem.
+Cult relics are loaded from `assets/relics.ppm`: a 4x1 atlas with four 32x32 pickup sprites. Magenta `#ff00ff` is transparent. A missing atlas terminates the program with an error.
 
-Dziesięć potworów patroluje poziom. Przeciwnicy wykrywają gracza po line-of-sight i FOV, zapamiętują ostatnią pozycję, ścigają, trzymają dystans i reagują na pobliskiego potwora, który widzi gracza. Szkielet strzela ognistymi pociskami, a pozostałe typy, w tym zjawa, atakują głównie ciosami z bliska.
+Ten monsters patrol the level. Enemies detect the player through line of sight and FOV, remember the last known position, chase, keep distance, and react to a nearby monster that can see the player. The skeleton shoots fire projectiles, while the other types, including the ghost, mostly attack in melee.
 
-Gracz startuje z nożem do krótkiego dystansu. Pistolet hitscan i fireball z osobną amunicją są odblokowywane pickupami. Fireball leci jako projectile, wybucha na ścianie albo przeciwniku i zadaje obrażenia obszarowe. Trafione potwory mają krótki pain flash, a śmierć robi proceduralny pomarańczowy pop. W tle gra eksperymentalny programowy syntezator FM; las używa cichego ponurego dronu, a każda krypta relikwii wybiera inny utwór MIDI z `assets/music/`.
+The player starts with a short-range knife. The hitscan pistol and fireball with separate ammo are unlocked through pickups. Fireballs travel as projectiles, explode on walls or enemies, and deal area damage. Hit monsters get a short pain flash, and death produces a procedural orange pop. The background music uses an experimental software FM synthesizer; the forest uses a quiet, grim drone, and each relic crypt selects a different MIDI track from `assets/music/`.
 
-Gra startuje w mrocznym lesie i z nożem w ręku; pistolet i fireball trzeba znaleźć jako pickupy. Level jest generowany runtime: pokoje, korytarze, drzwi, sekrety, pochodnie albo ogniska, itemy i potwory powstają z seeda przy starcie runu. Są cztery tryby generatora: klasyczny układ pokoi i korytarzy, ciasny jednokaflowy labirynt z wejściem i dalekim wyjściem, boss level z labiryntem i komnatą bossa oraz mroczny las jako duży ogrodzony teren z drzewami, ogniskami, kapliczkami cmentarnymi, potworami, itemami i wejściami do dungeonów. Las ma cztery wejścia do dungeonów z relikwiami kultu oraz osobną bramę bossa. Kapliczki blokują ruch, a `F` przy frontowych drzwiach przenosi do osobnego wnętrza z meblami, skrytkami i jednorazowym lootem. Wejście zapisuje aktualny stan lasu, a wyjście w dungeonie albo kapliczce odtwarza ten sam las i kamerę przy wejściu. Restart `R` tworzy następny seed w aktualnym trybie. `make dump` używa stałego seeda testowego, żeby render i walidacje były powtarzalne.
+The game starts in a dark forest with only the knife; the pistol and fireball must be found as pickups. Levels are generated at runtime: rooms, corridors, doors, secrets, torches or campfires, items, and monsters are created from the run seed. There are four generator modes: a classic rooms-and-corridors layout, a tight one-tile maze with an entrance and distant exit, a boss level with a maze and boss chamber, and a dark forest as a large fenced area with trees, campfires, cemetery shrines, monsters, items, and dungeon entrances. The forest has four relic dungeon entrances and a separate boss gate. Shrines block movement, and pressing `F` at their front doors enters a separate interior with furniture, caches, and one-time loot. Entering saves the current forest state, and exiting a dungeon or shrine restores the same forest and camera position near the entrance. Restarting with `R` creates the next seed in the current mode. `make dump` uses a fixed test seed so rendering and validations stay deterministic.
 
-Na mapie są itemy: apteczki, amunicja, rapid fire, damage boost, klucz, fireball ammo/unlock, złoto, kapliczki i cztery relikwie kultu. Pickupy są rozłożone także w bocznych odnogach, żeby eksploracja dawała zasoby do walki. Potwory wyrzucają małe kupki złota, kapliczki dają jednorazowy efekt w stylu Diablo, a stosy kości budują klimat i nie są podnoszone. Są proste drzwi, zamknięte drzwi na klucz i sekretne ściany otwierane interakcją. W prawym górnym rogu jest minimapa z fog-of-war, odkrywająca teren wokół gracza, a `Tab` pokazuje większą automapę.
+The map contains items: medkits, ammo, rapid fire, damage boost, keys, fireball ammo/unlock, gold, shrines, and four cult relics. Pickups are also placed in side branches so exploration provides resources for combat. Monsters drop small gold piles, shrines give a one-time Diablo-style effect, and bone piles provide atmosphere without being pickup items. There are normal doors, locked key doors, and secret walls opened through interaction. The top-right corner has a fog-of-war minimap that reveals terrain around the player, and `Tab` shows a larger automap.
 
-Zebranie kompletu czterech relikwii odblokowuje bramę bossa w lesie. Boss jest dużo większy i twardszy od zwykłych przeciwników, ma mocniejszy atak z bliska i wolniejszy, bolesny pocisk dystansowy. Zwycięstwo następuje dopiero po zabiciu bossa. Walka ma lekkie odpychanie przy kolizji z potworami, sample dźwiękowe strzałów/pickupów/eksplozji oraz pauzę, restart i fullscreen. Poziomy trudności to łatwy, normalny, trudny i nightmare; wyższe poziomy podbijają HP oraz obrażenia przeciwników.
+Collecting all four relics unlocks the boss gate in the forest. The boss is much larger and tougher than normal enemies, has a stronger melee attack, and fires a slower, painful ranged projectile. Victory happens only after killing the boss. Combat includes light knockback on monster collisions, sound samples for shots/pickups/explosions, pause, restart, and fullscreen. Difficulty levels are easy, normal, hard, and nightmare; higher levels increase enemy HP and damage.
 
 ## Renderer
 
-Renderer działa w całości softwareowo i składa finalny obraz w `uint32_t framebuffer[640x480]`. SDL2 tworzy okno, przyjmuje input, obsługuje audio i wyświetla gotową teksturę; raycast, sprite'y, światła, efekty i UI są liczone po stronie CPU.
+The renderer is fully software-based and composes the final image in a `uint32_t framebuffer[640x480]`. SDL2 creates the window, receives input, handles audio, and displays the finished texture; raycasting, sprites, lights, effects, and UI are computed on the CPU.
 
-Główne funkcje renderera:
+Main renderer features:
 
-- Kolumnowy raycaster ścian z DDA, korekcją dystansu, teksturowaniem z atlasu PPM i obsługą zwykłych, zamkniętych oraz otwierających się drzwi.
-- Osobny pass podłogi i sufitu z perspektywicznym mapowaniem tekstur, dystansowym światłem i fogiem.
-- Tryb lasu z proceduralnym nocnym niebem, gwiazdami, księżycem, poświatą księżyca, widocznością księżyca cache'owaną na mapie oraz zimnym światłem mieszanym z podłożem i ścianami.
-- Dwa tryby jakości: `fast` używa prostszego shadingu, a `pbr` dodaje lekki PBR-like model z parametrami materiałów, roughness/metallic/wetness/specular, fresnelem, jasnością texela i bump/normal lighting wyliczanym z tekstur.
-- Bufory głębi: kolumnowy `z_buffer` dla klasycznych sprite'ów oraz pełny `depth_buffer` dla passów ekranowych, mgły, propsów 3D i efektów post-processingu.
-- Sortowanie billboardów od najdalszych do najbliższych: potwory, pickupy, projectiles, pochodnie/ogniska, cząstki, portale i drzewa są zasłaniane przez ściany przez `z_buffer`.
-- Wielokierunkowe animowane sprite'y potworów, osobne większe atlasy dla giant skeletona i bossa, skalowanie bossów/gigantów, pain flash, attack windup glow i hit rim.
-- Billboardy drzew, portali, relikwii, shrine'ów, złota, bone pile, pocisków, eksplozji, fireballi i boltów z przezroczystością przez magentę `#ff00ff`.
-- Pochodnie w dungeonach i ogniska w lesie renderowane jako proceduralne sprite'y płomienia z flickerem, poświatą, wkładem do `glow_buffer` i lokalnym wpływem na ściany, podłogę, sufit oraz mgłę.
-- Dynamiczne światło gracza i broni: player torch, muzzle flash, shot trace dla broni hitscan oraz glow/light od fireballi, eksplozji, relikwii i shrine'ów.
-- Eksperymentalna mgła wolumetryczna: dystansowy fog na ścianach, podłodze, suficie i sprite'ach oraz osobny animowany pass kłębiastej mgły/scatteringu po buforze świata. Mgła jest cięższa przy ziemi i w lesie unika bezpośredniego malowania na ścianach.
-- Dynamiczne cienie pod sprite'ami i obiektami świata.
-- Decale podłogowe z `assets/decals.ppm`, między innymi scorch marks po eksplozjach, rzutowane na perspektywiczną podłogę i mieszane z fogiem.
-- Decale ścienne z `assets/wall_decals.ppm`, indeksowane per kafel/strona ściany i aplikowane podczas renderowania kolumn ścian.
-- Kapliczki w lesie renderowane jako proste bryły z testem przecięcia promienia z boxem, teksturowanymi ścianami, osobnym rysowaniem dachów i szczytów oraz fogiem.
-- Wnętrza kapliczek mają proste 3D propsy: teksturowane boxy i walce, triangulowane w software, z podstawowym światłem powierzchni i testem `depth_buffer`.
-- Soft particles dla dymu/iskier z miękkim zanikiem przy przecięciu ze ścianami na podstawie `z_buffer`.
-- Leśny overlay pogodowy: subtelna deszczowa poświata i pionowe smugi deszczu nad sceną.
-- Opcjonalny light buffer/pseudo-deferred composite, threshold bloom z dwustopniowym blur buforem i trzema presetami intensywności post-processingu.
-- Opcjonalny selektywny edge antialiasing oparty o kontrast luminancji, nakładany tylko na świat gry.
-- Opcjonalny color grading z kontrastem, jasnością, tintem, LUT-like korekcją kanałów, vignette i osobnymi wariantami presetów; las ma własny chłodniejszy grading.
-- Efekty feedbacku: screen shake przez jitter kamery, czerwony hit flash na krawędziach ekranu, kierunkowy wskaźnik obrażeń, hit marker, recoil/bob i animowane sprite'y broni.
-- HUD i UI renderowane tym samym softwareowym rasterem: celownik, broń, shot trace, paski HP/ammo, relikwie, złoto, minimapa z fog-of-war, pełna automapa, prompt interakcji, menu, sklep, pauza, victory screen oraz overlay FPS/timing.
-- Profilowanie passów renderera pod `F4` i `--profile-dump`: total, floor, wall, sprite, fog, bloom i post.
-- Headless dumpy renderu: `make dump`, `--dump`, `--dump-house`, `--dump-quality` i `--profile-dump` zapisują deterministyczne klatki PPM do regresji.
+- Column-based wall raycaster with DDA, distance correction, PPM atlas texturing, and support for normal, locked, and opening doors.
+- Separate floor and ceiling pass with perspective texture mapping, distance lighting, and fog.
+- Forest mode with a procedural night sky, stars, moon, moon glow, map-cached moon visibility, and cool moonlight mixed into the ground and walls.
+- Two quality modes: `fast` uses simpler shading, while `pbr` adds a lightweight PBR-like model with material parameters, roughness/metallic/wetness/specular, Fresnel, texel brightness, and bump/normal lighting derived from textures.
+- Depth buffers: a column `z_buffer` for classic sprites and a full `depth_buffer` for screen-space passes, fog, 3D props, and post-processing effects.
+- Back-to-front billboard sorting: monsters, pickups, projectiles, torches/campfires, particles, portals, and trees are occluded by walls through `z_buffer`.
+- Multi-direction animated monster sprites, separate larger atlases for the giant skeleton and boss, boss/giant scaling, pain flash, attack windup glow, and hit rim.
+- Billboards for trees, portals, relics, shrines, gold, bone piles, projectiles, explosions, fireballs, and bolts with magenta `#ff00ff` transparency.
+- Dungeon torches and forest campfires rendered as procedural flame sprites with flicker, glow, `glow_buffer` contribution, and local influence on walls, floors, ceilings, and fog.
+- Dynamic player and weapon lighting: player torch, muzzle flash, hitscan shot trace, and glow/light from fireballs, explosions, relics, and shrines.
+- Experimental volumetric fog: distance fog on walls, floors, ceilings, and sprites, plus a separate animated cloudy fog/scattering pass over the world buffer. Fog is heavier near the ground and avoids directly painting over forest walls.
+- Dynamic shadows under sprites and world objects.
+- Floor decals from `assets/decals.ppm`, including scorch marks after explosions, projected onto the perspective floor and mixed with fog.
+- Wall decals from `assets/wall_decals.ppm`, indexed per tile/wall side and applied while rendering wall columns.
+- Forest shrines rendered as simple solids using ray/box intersection, textured walls, separately drawn roofs and gables, and fog.
+- Shrine interiors contain simple 3D props: textured boxes and cylinders, triangulated in software, with basic surface lighting and `depth_buffer` testing.
+- Soft particles for smoke/sparks with soft fade at wall intersections based on `z_buffer`.
+- Forest weather overlay: subtle rainy haze and vertical rain streaks over the scene.
+- Optional light buffer/pseudo-deferred composite, threshold bloom with a two-stage blur buffer, and three post-processing intensity presets.
+- Optional selective edge antialiasing based on luminance contrast, applied only to the game world.
+- Optional color grading with contrast, brightness, tint, LUT-like channel correction, vignette, and separate preset variants; the forest has its own cooler grade.
+- Feedback effects: screen shake through camera jitter, red hit flash on screen edges, directional damage indicator, hit marker, recoil/bob, and animated weapon sprites.
+- HUD and UI rendered by the same software raster: crosshair, weapon, shot trace, HP/ammo bars, relics, gold, fog-of-war minimap, full automap, interaction prompt, menu, shop, pause, victory screen, and FPS/timing overlays.
+- Renderer pass profiling under `F4` and `--profile-dump`: total, floor, wall, sprite, fog, bloom, and post.
+- Headless render dumps: `make dump`, `--dump`, `--dump-house`, `--dump-quality`, and `--profile-dump` write deterministic PPM frames for regression checks.
 
-Cięższe passy post-processingu są przełączane przez `--effects full`, `--effects preset2`, `--effects preset3` albo w menu ustawień. Jakość renderu można ustawić przez `--quality pbr|fast` albo w menu.
+Heavier post-processing passes can be changed with `--effects full`, `--effects preset2`, `--effects preset3`, or from the settings menu. Render quality can be set with `--quality pbr|fast` or from the menu.
 
 ## Build
 
@@ -65,42 +65,42 @@ make
 ./dioom
 ```
 
-Makefile domyślnie używa SDL2 z Homebrew:
+The Makefile uses Homebrew SDL2 by default:
 
 ```sh
 SDL2_PREFIX=/opt/homebrew/opt/sdl2 make
 ```
 
-## Sterowanie
+## Controls
 
-- `W/S` albo strzałki góra/dół: przód/tył
-- `A/D` albo strzałki lewo/prawo: obrót
-- `Q/E`: strafing
-- `1/2/3`: nóż / pistolet po podniesieniu / fireball po podniesieniu
-- `Spacja` albo lewy przycisk myszy: strzał z wybranej broni
-- `F`: interakcja z drzwiami, sekretami, wejściami i wyjściami dungeonów/kapliczek oraz lootowalnymi meblami
-- `H`: pokazuje/ukrywa podpowiedź celu
-- `Tab`: pełna automapa
-- `P`: pauza
-- `R`: restart runu
+- `W/S` or up/down arrows: move forward/backward
+- `A/D` or left/right arrows: turn
+- `Q/E`: strafe
+- `1/2/3`: knife / pistol after pickup / fireball after pickup
+- `Space` or left mouse button: fire the selected weapon
+- `F`: interact with doors, secrets, dungeon/shrine entrances and exits, and lootable furniture
+- `H`: show/hide the objective hint
+- `Tab`: full automap
+- `P`: pause
+- `R`: restart the run
 - `F3/F4`: FPS / timing
-- `F8/F9`: menu zapisu / odczytu gry z 8 slotami `dioom_slot1.sav`..`dioom_slot8.sav`
+- `F8/F9`: save/load menu with 8 slots, `dioom_slot1.sav` through `dioom_slot8.sav`
 - `F11`: fullscreen
-- `Esc`: menu gry
-- Menu: `W/S` albo strzałki wybierają pozycję, `Enter`/`Spacja` zatwierdza, a `Esc` wraca poziom wyżej. Ustawienia są w osobnym podmenu, gdzie `A/D` zmienia trudność, jakość, post-processing, suwaki głośności FX/muzyki i fullscreen. Menu główne zawiera start/wznowienie, restart runu, zapis, odczyt, ustawienia i wyjście.
+- `Esc`: game menu
+- Menu: `W/S` or arrows select an item, `Enter`/`Space` confirms, and `Esc` goes one level back. Settings are in a separate submenu where `A/D` changes difficulty, quality, post-processing, FX/music volume sliders, and fullscreen. The main menu contains start/resume, restart run, save, load, settings, and exit.
 
-Ustawienia menu są zapisywane do `dioom.ini` przy wyjściu i po zmianie opcji. Obsługiwane klucze to `difficulty=easy|normal|hard|nightmare`, `quality=pbr|fast`, `post_process=full|off`, `fullscreen=0|1`, `sfx_volume=0..8`, `music_volume=0..8` i ukryte `trainer=0|1`. Trainer blokuje obrażenia gracza, nie zużywa amunicji ani fireball ammo oraz startuje z kompletem czterech relikwii.
+Menu settings are saved to `dioom.ini` on exit and after option changes. Supported keys are `difficulty=easy|normal|hard|nightmare`, `quality=pbr|fast`, `post_process=full|off`, `fullscreen=0|1`, `sfx_volume=0..8`, `music_volume=0..8`, and hidden `trainer=0|1`. Trainer blocks player damage, prevents ammo and fireball ammo consumption, and starts with all four relics.
 
 ## Render test
 
-Bez otwierania okna można zapisać pojedynczą klatkę:
+You can save a single frame without opening a window:
 
 ```sh
 make dump
 open frame.ppm
 ```
 
-Do kontroli wnętrza kapliczki można wyrenderować osobny kadr:
+To inspect a shrine interior, render a separate frame:
 
 ```sh
 ./dioom --dump-house /tmp/house.ppm
