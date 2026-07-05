@@ -1268,6 +1268,28 @@ EM_JS(int, web_key_down_id, (int id), {
     return Module.dioomInputReady && Module.dioomKeys[id] ? 1 : 0;
 });
 
+EM_JS(void, web_restore_settings_file, (void), {
+    try {
+        var text = localStorage.getItem('dioom.ini');
+        if (text !== null) {
+            FS.writeFile('dioom.ini', text);
+        }
+    } catch (error) {
+        console.error('warning: cannot restore dioom.ini from browser storage: ' + error);
+    }
+});
+
+EM_JS(int, web_persist_settings_file, (void), {
+    try {
+        var text = FS.readFile('dioom.ini', { encoding: 'utf8' });
+        localStorage.setItem('dioom.ini', text);
+        return 1;
+    } catch (error) {
+        console.error('error: cannot persist dioom.ini to browser storage: ' + error);
+        return 0;
+    }
+});
+
 static SDL_Keycode web_input_keycode(int id)
 {
     switch (id) {
@@ -12454,6 +12476,11 @@ static void cycle_runtime_render_effects(Runtime *rt, int delta)
 static int toggle_runtime_fullscreen(Runtime *rt)
 {
     int next_fullscreen = !rt->fullscreen;
+#ifdef __EMSCRIPTEN__
+    rt->fullscreen = next_fullscreen;
+    save_runtime_settings(rt);
+    return 1;
+#else
     if (SDL_SetWindowFullscreen(rt->window, next_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {
         fprintf(stderr, "SDL_SetWindowFullscreen failed: %s\n", SDL_GetError());
         return 0;
@@ -12461,6 +12488,7 @@ static int toggle_runtime_fullscreen(Runtime *rt)
     rt->fullscreen = next_fullscreen;
     save_runtime_settings(rt);
     return 1;
+#endif
 }
 
 static void adjust_runtime_settings_item(Runtime *rt, int item, int delta)
@@ -12751,6 +12779,12 @@ static int save_settings_file(int difficulty, int quality, int effects, int full
         fprintf(stderr, "error: cannot close %s: %s\n", SETTINGS_PATH, strerror(errno));
         return 0;
     }
+#ifdef __EMSCRIPTEN__
+    if (!web_persist_settings_file()) {
+        fprintf(stderr, "error: cannot persist %s to browser storage\n", SETTINGS_PATH);
+        return 0;
+    }
+#endif
     return 1;
 }
 
@@ -12758,6 +12792,9 @@ static int parse_runtime_config(int argc, char **argv, RuntimeConfig *config)
 {
     init_runtime_config_defaults(config);
     load_runtime_settings(config);
+#ifdef __EMSCRIPTEN__
+    config->fullscreen = 0;
+#endif
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--window") == 0) {
@@ -12923,12 +12960,16 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
     rt->music_volume = clamp_volume_step(config->music_volume);
     set_audio_volume_steps(rt->sfx_volume, rt->music_volume);
     if (config->fullscreen) {
+#ifdef __EMSCRIPTEN__
+        rt->fullscreen = 1;
+#else
         if (SDL_SetWindowFullscreen(rt->window, SDL_WINDOW_FULLSCREEN_DESKTOP) != 0) {
             fprintf(stderr, "SDL_SetWindowFullscreen failed: %s\n", SDL_GetError());
             shutdown_runtime(rt);
             return 0;
         }
         rt->fullscreen = 1;
+#endif
     }
     reset_run(&rt->game, &rt->cam);
     rt->settings_ready = 1;
@@ -13253,6 +13294,9 @@ int main(int argc, char **argv)
     }
 
     RuntimeConfig config;
+#ifdef __EMSCRIPTEN__
+    web_restore_settings_file();
+#endif
     if (!parse_runtime_config(argc, argv, &config)) {
         return 1;
     }

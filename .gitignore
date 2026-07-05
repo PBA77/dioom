@@ -3,6 +3,7 @@ dioom.dSYM/
 dioom-hires
 dioom-hires.dSYM/
 dioom.ini
+!web/dioom.ini
 dioom.sav
 dioom_slot*.sav
 dioom_slot*.sav.tmp

@@ -18,6 +18,7 @@ WEB_DIR := web
 WEB_TARGET := $(WEB_DIR)/index.html
 WEB_SHELL := $(WEB_DIR)/shell.html
 WEB_ASSETS := $(shell find assets -type f)
+WEB_SETTINGS := $(WEB_DIR)/dioom.ini
 
 .PHONY: all clean clean-wasm run dump hires run-hires dump-hires wasm check-emscripten
 
@@ -55,8 +56,8 @@ check-emscripten:
 		exit 1; \
 	fi
 
-$(WEB_TARGET): $(SRC) $(WEB_SHELL) $(WEB_ASSETS) | $(WEB_DIR)
-	EMSDK_PYTHON="$(EMSDK_PYTHON)" $(EMCC) $(CFLAGS) -sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 --preload-file assets@assets --shell-file $(WEB_SHELL) -o $@ $(SRC) -lm
+$(WEB_TARGET): $(SRC) $(WEB_SHELL) $(WEB_SETTINGS) $(WEB_ASSETS) | $(WEB_DIR)
+	EMSDK_PYTHON="$(EMSDK_PYTHON)" $(EMCC) $(CFLAGS) -sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 --preload-file assets@assets --preload-file $(WEB_SETTINGS)@dioom.ini --shell-file $(WEB_SHELL) -o $@ $(SRC) -lm
 
 $(WEB_DIR):
 	mkdir -p $@
