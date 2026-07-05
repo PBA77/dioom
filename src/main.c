@@ -1268,24 +1268,57 @@ EM_JS(int, web_key_down_id, (int id), {
     return Module.dioomInputReady && Module.dioomKeys[id] ? 1 : 0;
 });
 
-EM_JS(void, web_restore_settings_file, (void), {
+EM_JS(void, web_restore_persistent_files, (int slot_count), {
     try {
-        var text = localStorage.getItem('dioom.ini');
-        if (text !== null) {
-            FS.writeFile('dioom.ini', text);
+        var settings = localStorage.getItem('dioom.ini');
+        if (settings !== null) {
+            FS.writeFile('dioom.ini', settings);
+        }
+        var base64ToBytes = function(text) {
+            var binary = atob(text);
+            var bytes = new Uint8Array(binary.length);
+            for (var i = 0; i < binary.length; ++i) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes;
+        };
+        for (var slot = 1; slot <= slot_count; ++slot) {
+            var path = 'dioom_slot' + slot + '.sav';
+            var data = localStorage.getItem(path);
+            if (data !== null) {
+                FS.writeFile(path, base64ToBytes(data));
+            }
         }
     } catch (error) {
-        console.error('warning: cannot restore dioom.ini from browser storage: ' + error);
+        console.error('warning: cannot restore persistent browser files: ' + error);
     }
 });
 
-EM_JS(int, web_persist_settings_file, (void), {
+EM_JS(int, web_persist_text_file, (const char *path_ptr), {
     try {
-        var text = FS.readFile('dioom.ini', { encoding: 'utf8' });
-        localStorage.setItem('dioom.ini', text);
+        var path = UTF8ToString(path_ptr);
+        var text = FS.readFile(path, { encoding: 'utf8' });
+        localStorage.setItem(path, text);
         return 1;
     } catch (error) {
-        console.error('error: cannot persist dioom.ini to browser storage: ' + error);
+        console.error('error: cannot persist text file to browser storage: ' + error);
+        return 0;
+    }
+});
+
+EM_JS(int, web_persist_binary_file, (const char *path_ptr), {
+    try {
+        var path = UTF8ToString(path_ptr);
+        var bytes = FS.readFile(path);
+        var text = "";
+        var chunk_size = 0x8000;
+        for (var i = 0; i < bytes.length; i += chunk_size) {
+            text += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk_size));
+        }
+        localStorage.setItem(path, btoa(text));
+        return 1;
+    } catch (error) {
+        console.error('error: cannot persist binary file to browser storage: ' + error);
         return 0;
     }
 });
@@ -12354,6 +12387,12 @@ static int save_runtime_game(Runtime *rt, int slot)
         remove(tmp_path);
         return 0;
     }
+#ifdef __EMSCRIPTEN__
+    if (!web_persist_binary_file(path)) {
+        fprintf(stderr, "error: cannot persist savegame %s to browser storage\n", path);
+        return 0;
+    }
+#endif
     close_slot_menu(rt);
     return 1;
 }
@@ -12780,7 +12819,7 @@ static int save_settings_file(int difficulty, int quality, int effects, int full
         return 0;
     }
 #ifdef __EMSCRIPTEN__
-    if (!web_persist_settings_file()) {
+    if (!web_persist_text_file(SETTINGS_PATH)) {
         fprintf(stderr, "error: cannot persist %s to browser storage\n", SETTINGS_PATH);
         return 0;
     }
@@ -13295,7 +13334,7 @@ int main(int argc, char **argv)
 
     RuntimeConfig config;
 #ifdef __EMSCRIPTEN__
-    web_restore_settings_file();
+    web_restore_persistent_files(SAVEGAME_SLOT_COUNT);
 #endif
     if (!parse_runtime_config(argc, argv, &config)) {
         return 1;
