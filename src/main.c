@@ -9395,8 +9395,8 @@ static void enter_house_from_forest(GameState *game, Camera *cam, int house_inde
     set_active_music_track(MUSIC_TRACK_DIES_IRAE);
     *cam = (Camera){
         .pos = {8.35, 12.50},
-        .dir = {-1.0, 0.0},
-        .plane = {0.0, -0.66},
+        .dir = {1.0, 0.0},
+        .plane = {0.0, 0.66},
     };
     reveal_fog(game, cam);
     play_sfx(SFX_DOOR, 0.48);
@@ -10974,9 +10974,9 @@ static int verify_forest_house_transition(void)
         fprintf(stderr, "error: house entrance did not create an interior level\n");
         return 0;
     }
-    if (!active_portal_prompt(&game, &cam) ||
+    if (cam.dir.x <= 0.9 || fabs(cam.dir.y) > 0.001 ||
         map_at(game.portals[0].x, game.portals[0].y) != WALL_DOOR) {
-        fprintf(stderr, "error: house exit door is not visible and usable from the entrance\n");
+        fprintf(stderr, "error: house entrance did not face into the interior with a valid exit door behind it\n");
         return 0;
     }
 
@@ -12040,8 +12040,8 @@ static int dump_frame_mode(const char *path, int mode)
     if (mode == GENERATOR_HOUSE) {
         cam = (Camera){
             .pos = {8.35, 12.50},
-            .dir = {-1.0, 0.0},
-            .plane = {0.0, -0.66},
+            .dir = {1.0, 0.0},
+            .plane = {0.0, 0.66},
         };
     }
     reveal_fog(&game, &cam);
