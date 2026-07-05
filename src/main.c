@@ -158,6 +158,13 @@
 #define SAVEGAME_VERSION 7u
 #define MAX_SAMPLE_VOICES 16
 #define MAX_MIDI_VOICES 24
+#ifdef __EMSCRIPTEN__
+#define ACTIVE_MIDI_VOICE_LIMIT 12
+#define AUDIO_BUFFER_SAMPLES 4096
+#else
+#define ACTIVE_MIDI_VOICE_LIMIT MAX_MIDI_VOICES
+#define AUDIO_BUFFER_SAMPLES 512
+#endif
 #define MONSTER_FLYING_HEAD 4
 #define MONSTER_GIANT_SKELETON 5
 #define MONSTER_BOSS_BUTCHER 6
@@ -796,6 +803,8 @@ typedef struct {
     int channel;
     int instrument;
     double velocity;
+    double freq;
+    double mod_ratio;
     double phase;
     double mod_phase;
     double age;
@@ -1464,7 +1473,7 @@ static void fm_midi_note_on(uint8_t note, uint8_t velocity, uint8_t channel)
 {
     int slot = -1;
     double oldest = -1.0;
-    for (int i = 0; i < MAX_MIDI_VOICES; ++i) {
+    for (int i = 0; i < ACTIVE_MIDI_VOICE_LIMIT; ++i) {
         if (!midi_voices[i].active) {
             slot = i;
             break;
@@ -1479,12 +1488,16 @@ static void fm_midi_note_on(uint8_t note, uint8_t velocity, uint8_t channel)
     if (slot < 0) {
         return;
     }
+    int instrument = fm_instrument_for_note(active_music_track_index(), channel, note);
+    double freq = midi_note_frequency(note);
     midi_voices[slot] = (FmMidiVoice){
         .active = 1,
         .note = note,
         .channel = channel,
-        .instrument = fm_instrument_for_note(active_music_track_index(), channel, note),
+        .instrument = instrument,
         .velocity = clamp01(velocity / 127.0),
+        .freq = freq,
+        .mod_ratio = fm_instrument(instrument)->mod_ratio * (note & 1 ? 1.003 : 0.997),
         .phase = 0.0,
         .mod_phase = 0.0,
         .age = 0.0,
@@ -1495,7 +1508,7 @@ static void fm_midi_note_on(uint8_t note, uint8_t velocity, uint8_t channel)
 
 static void fm_midi_note_off(uint8_t note, uint8_t channel)
 {
-    for (int i = 0; i < MAX_MIDI_VOICES; ++i) {
+    for (int i = 0; i < ACTIVE_MIDI_VOICE_LIMIT; ++i) {
         FmMidiVoice *voice = &midi_voices[i];
         if (voice->active && voice->note == note && voice->channel == channel && voice->release_time < 0.0) {
             voice->release_level = fm_midi_voice_envelope(voice);
@@ -1510,7 +1523,7 @@ static double fm_midi_voices_sample(void)
     double dt = 1.0 / audio_rate;
     double phase_step = M_PI * 2.0 / audio_rate;
 
-    for (int i = 0; i < MAX_MIDI_VOICES; ++i) {
+    for (int i = 0; i < ACTIVE_MIDI_VOICE_LIMIT; ++i) {
         FmMidiVoice *voice = &midi_voices[i];
         if (!voice->active) {
             continue;
@@ -1528,15 +1541,13 @@ static double fm_midi_voices_sample(void)
             continue;
         }
 
-        double freq = midi_note_frequency(voice->note);
-        double ratio = instrument->mod_ratio * (voice->note & 1 ? 1.003 : 0.997);
         double index = instrument->index_base + voice->velocity * instrument->velocity_index;
         double tone = sin(voice->phase + sin(voice->mod_phase) * index);
         tone += sin(voice->phase * 0.5) * instrument->sub_level;
         sample += tone * env * voice->velocity * instrument->level * 0.090;
 
-        voice->phase += freq * phase_step;
-        voice->mod_phase += freq * ratio * phase_step;
+        voice->phase += voice->freq * phase_step;
+        voice->mod_phase += voice->freq * voice->mod_ratio * phase_step;
         wrap_audio_phase(&voice->phase);
         wrap_audio_phase(&voice->mod_phase);
         voice->age += dt;
@@ -1791,7 +1802,7 @@ static int init_audio(void)
     want.freq = 44100;
     want.format = AUDIO_S16SYS;
     want.channels = 1;
-    want.samples = 512;
+    want.samples = AUDIO_BUFFER_SAMPLES;
     want.callback = audio_callback;
 
     audio_device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
