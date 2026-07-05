@@ -9078,7 +9078,11 @@ static int menu_item_count_for_page(int page)
     if (page == MENU_PAGE_SAVE || page == MENU_PAGE_LOAD) {
         return SLOT_MENU_ITEM_COUNT;
     }
+#ifdef __EMSCRIPTEN__
+    return MAIN_MENU_ITEM_EXIT;
+#else
     return MAIN_MENU_ITEM_COUNT;
+#endif
 }
 
 static const char *menu_item_description(int page, int item)
@@ -9161,7 +9165,12 @@ static void render_game_menu(int page,
     const char **items = page == MENU_PAGE_SETTINGS ? settings_items : main_items;
     int item_count = menu_item_count_for_page(page);
     int w = 328;
-    int h = page == MENU_PAGE_SETTINGS ? 344 : (page == MENU_PAGE_SAVE || page == MENU_PAGE_LOAD ? 408 : 336);
+    int h = page == MENU_PAGE_SETTINGS ? 344 : (page == MENU_PAGE_SAVE || page == MENU_PAGE_LOAD ? 408 : 304);
+#ifndef __EMSCRIPTEN__
+    if (page == MENU_PAGE_MAIN) {
+        h = 336;
+    }
+#endif
     int x = SCREEN_W / 2 - w / 2;
     int y = SCREEN_H / 2 - h / 2;
     if (page == MENU_PAGE_SAVE || page == MENU_PAGE_LOAD) {
@@ -9222,7 +9231,12 @@ static void render_game_menu(int page,
 
     render_centered_prompt_line(y + h - 62, menu_item_description(page, selected), rgb(174, 156, 112));
     render_centered_prompt_line(y + h - 34, "W/S WYBOR ENTER AKCJA", rgb(148, 132, 100));
-    const char *footer = game_started ? "ESC WROC" : "ESC WYJSCIE";
+    const char *footer = game_started ? "ESC WROC" : "ENTER START";
+#ifndef __EMSCRIPTEN__
+    if (!game_started) {
+        footer = "ESC WYJSCIE";
+    }
+#endif
     if (page == MENU_PAGE_SETTINGS) {
         footer = "A/D ZMIANA ESC WROC";
     } else if (page == MENU_PAGE_SAVE || page == MENU_PAGE_LOAD) {
@@ -13080,8 +13094,10 @@ static void handle_runtime_keydown(Runtime *rt, SDL_Keycode key, int repeat)
                     open_load_menu(rt);
                 } else if (rt->menu_selected == MAIN_MENU_ITEM_SETTINGS) {
                     open_settings_menu(rt);
+#ifndef __EMSCRIPTEN__
                 } else if (rt->menu_selected == MAIN_MENU_ITEM_EXIT) {
                     rt->running = 0;
+#endif
                 }
             }
         } else if (key == SDLK_ESCAPE && repeat == 0) {
