@@ -71,6 +71,33 @@ The Makefile uses Homebrew SDL2 by default:
 SDL2_PREFIX=/opt/homebrew/opt/sdl2 make
 ```
 
+## Web/WASM
+
+The committed static web bundle lives in `web/`:
+
+- `web/index.html`
+- `web/index.js`
+- `web/index.wasm`
+- `web/index.data`
+
+`web/index.data` contains the preloaded runtime assets and `web/dioom.ini`. The source shell is `web/shell.html`; rebuild the bundle after C, asset, shell, or web settings changes:
+
+```sh
+make wasm
+```
+
+On this machine Emscripten needs the explicit Python path:
+
+```sh
+make wasm EMSDK_PYTHON=/opt/homebrew/opt/python@3.14/bin/python3.14
+```
+
+The `web/` directory is deployable as static output, for example:
+
+```sh
+vercel deploy web --prod --yes
+```
+
 ## Controls
 
 - `W/S` or up/down arrows: move forward/backward

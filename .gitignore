@@ -16,8 +16,5 @@ frame.ppm
 frame.png
 frame_forest.ppm
 frame_forest.png
+web-vercel-check*.png
 .DS_Store
-web/index.html
-web/index.js
-web/index.wasm
-web/index.data
