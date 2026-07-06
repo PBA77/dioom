@@ -82,6 +82,7 @@
 #define AUDIO_VOLUME_STEPS 8
 #define DEFAULT_SFX_VOLUME_STEP 8
 #define DEFAULT_MUSIC_VOLUME_STEP 6
+#define MAX_RENDER_THREADS 16
 #define FM_NOTE_ATTACK 0.010
 #define FM_NOTE_DECAY 7.2
 #define FM_NOTE_MAX_HOLD 0.18
@@ -740,6 +741,26 @@ typedef struct {
     double total_ms;
 } RenderProfile;
 
+enum {
+    RENDER_JOB_FLOOR_CEILING = 1,
+    RENDER_JOB_VOLUMETRIC_FOG
+};
+
+#ifndef __EMSCRIPTEN__
+typedef struct {
+    SDL_Thread **threads;
+    SDL_sem *start_sem;
+    SDL_sem *done_sem;
+    SDL_atomic_t next_range;
+    int thread_count;
+    int range_count;
+    int job;
+    int stop;
+    const Camera *cam;
+    const GameState *game;
+} RenderWorkers;
+#endif
+
 typedef struct {
     Uint8 *data;
     Uint32 length;
@@ -861,6 +882,10 @@ static int fog_lut_ready = 0;
 static RenderProfile *active_profile = NULL;
 static int render_quality = DEFAULT_RENDER_QUALITY;
 static int render_effects = DEFAULT_RENDER_EFFECTS;
+static int render_thread_count = 1;
+#ifndef __EMSCRIPTEN__
+static RenderWorkers render_workers;
+#endif
 
 static double house_min_x(const House *house);
 static double house_max_x(const House *house);
@@ -872,6 +897,8 @@ static double vec_dot(Vec2 a, Vec2 b);
 static int parse_render_effects(const char *text, int *out_effects);
 static const char *render_effects_config_text(int effects);
 static void blend_rect(int x, int y, int w, int h, uint32_t color, double amount);
+static void render_job_range(int job, int range_index, int range_count, const Camera *cam, const GameState *game);
+static void render_parallel_ranges(int job, int range_count, const Camera *cam, const GameState *game);
 static GameState *active_game = NULL;
 static SfxSample sfx_samples[SFX_COUNT];
 static SampleVoice sample_voices[MAX_SAMPLE_VOICES];
@@ -1008,6 +1035,129 @@ static uint32_t apply_fog(uint32_t color, double distance, double strength)
 static uint32_t apply_game_fog(const GameState *game, uint32_t color, double distance, double strength)
 {
     return mix_color(color, fog_color_for_game(game), fog_amount_for_game(game, distance) * clamp01(strength));
+}
+
+static int default_render_thread_count(void)
+{
+#ifdef __EMSCRIPTEN__
+    return 1;
+#else
+    int cpus = SDL_GetCPUCount();
+    int threads = cpus > 1 ? cpus - 1 : 1;
+    if (threads > 6) {
+        threads = 6;
+    }
+    if (threads < 1) {
+        threads = 1;
+    }
+    return threads;
+#endif
+}
+
+static int render_worker_range_count(void)
+{
+    return render_thread_count > 1 ? render_thread_count * 2 : 1;
+}
+
+#ifndef __EMSCRIPTEN__
+static int render_worker_main(void *unused)
+{
+    (void)unused;
+    for (;;) {
+        SDL_SemWait(render_workers.start_sem);
+        if (render_workers.stop) {
+            break;
+        }
+        for (;;) {
+            int range = SDL_AtomicAdd(&render_workers.next_range, 1);
+            if (range >= render_workers.range_count) {
+                break;
+            }
+            render_job_range(render_workers.job, range, render_workers.range_count, render_workers.cam, render_workers.game);
+        }
+        SDL_SemPost(render_workers.done_sem);
+    }
+    return 0;
+}
+
+static void shutdown_render_workers(void)
+{
+    if (render_workers.thread_count > 0 && render_workers.start_sem) {
+        render_workers.stop = 1;
+        for (int i = 0; i < render_workers.thread_count; ++i) {
+            SDL_SemPost(render_workers.start_sem);
+        }
+        for (int i = 0; i < render_workers.thread_count; ++i) {
+            if (render_workers.threads[i]) {
+                SDL_WaitThread(render_workers.threads[i], NULL);
+            }
+        }
+    }
+    if (render_workers.start_sem) {
+        SDL_DestroySemaphore(render_workers.start_sem);
+    }
+    if (render_workers.done_sem) {
+        SDL_DestroySemaphore(render_workers.done_sem);
+    }
+    free(render_workers.threads);
+    memset(&render_workers, 0, sizeof(render_workers));
+    render_thread_count = 1;
+}
+
+static int init_render_workers(int thread_count)
+{
+    shutdown_render_workers();
+    render_thread_count = thread_count > 1 ? thread_count : 1;
+    if (render_thread_count <= 1) {
+        return 1;
+    }
+
+    render_workers.threads = calloc((size_t)render_thread_count, sizeof(render_workers.threads[0]));
+    render_workers.start_sem = SDL_CreateSemaphore(0);
+    render_workers.done_sem = SDL_CreateSemaphore(0);
+    if (!render_workers.threads || !render_workers.start_sem || !render_workers.done_sem) {
+        fprintf(stderr, "error: cannot initialize render worker synchronization: %s\n", SDL_GetError());
+        shutdown_render_workers();
+        return 0;
+    }
+
+    for (int i = 0; i < render_thread_count; ++i) {
+        render_workers.thread_count = i + 1;
+        render_workers.threads[i] = SDL_CreateThread(render_worker_main, "dioom-render", NULL);
+        if (!render_workers.threads[i]) {
+            fprintf(stderr, "error: cannot create render worker %d/%d: %s\n", i + 1, render_thread_count, SDL_GetError());
+            shutdown_render_workers();
+            return 0;
+        }
+    }
+    return 1;
+}
+#endif
+
+static void render_parallel_ranges(int job, int range_count, const Camera *cam, const GameState *game)
+{
+    if (range_count < 1) {
+        range_count = 1;
+    }
+#ifndef __EMSCRIPTEN__
+    if (render_workers.thread_count > 1) {
+        render_workers.job = job;
+        render_workers.range_count = range_count;
+        render_workers.cam = cam;
+        render_workers.game = game;
+        SDL_AtomicSet(&render_workers.next_range, 0);
+        for (int i = 0; i < render_workers.thread_count; ++i) {
+            SDL_SemPost(render_workers.start_sem);
+        }
+        for (int i = 0; i < render_workers.thread_count; ++i) {
+            SDL_SemWait(render_workers.done_sem);
+        }
+        return;
+    }
+#endif
+    for (int range = 0; range < range_count; ++range) {
+        render_job_range(job, range, range_count, cam, game);
+    }
 }
 
 static double luminance(uint32_t color)
@@ -3262,7 +3412,7 @@ static void render_forest_sky(const Camera *cam, const GameState *game)
     (void)game;
 }
 
-static void render_floor_ceiling(const Camera *cam, const GameState *game)
+static void render_floor_ceiling_range(const Camera *cam, const GameState *game, int range_index, int range_count)
 {
     int fast_render = render_quality == RENDER_QUALITY_FAST;
     int forest_mode = game->generator_mode == GENERATOR_FOREST;
@@ -3272,12 +3422,12 @@ static void render_floor_ceiling(const Camera *cam, const GameState *game)
     double ray_dir_y0 = cam->dir.y - cam->plane.y;
     double ray_dir_x1 = cam->dir.x + cam->plane.x;
     double ray_dir_y1 = cam->dir.y + cam->plane.y;
+    int y_base = SCREEN_H / 2;
+    int y_total = SCREEN_H - y_base;
+    int y_start = y_base + y_total * range_index / range_count;
+    int y_end = y_base + y_total * (range_index + 1) / range_count;
 
-    if (forest_mode) {
-        render_forest_sky(cam, game);
-    }
-
-    for (int y = SCREEN_H / 2; y < SCREEN_H; ++y) {
+    for (int y = y_start; y < y_end; ++y) {
         int p = y - SCREEN_H / 2;
         if (p == 0) {
             for (int x = 0; x < SCREEN_W; ++x) {
@@ -3393,6 +3543,14 @@ static void render_floor_ceiling(const Camera *cam, const GameState *game)
             }
         }
     }
+}
+
+static void render_floor_ceiling(const Camera *cam, const GameState *game)
+{
+    if (game->generator_mode == GENERATOR_FOREST) {
+        render_forest_sky(cam, game);
+    }
+    render_parallel_ranges(RENDER_JOB_FLOOR_CEILING, render_worker_range_count(), cam, game);
 }
 
 static void render_forest_moon(const Camera *cam, const GameState *game)
@@ -4195,13 +4353,17 @@ static void render_world_sprites(const Camera *cam, const GameState *game)
     }
 }
 
-static void render_volumetric_fog(const Camera *cam, const GameState *game)
+static void render_volumetric_fog_range(const Camera *cam, const GameState *game, int range_index, int range_count)
 {
     uint32_t fog = fog_color_for_game(game);
     int fog_stride = (SCREEN_W >= 640 || SCREEN_H >= 400) ? 2 : 1;
     int scatter_steps = fog_stride > 1 ? 2 : 4;
+    int column_count = (SCREEN_W + fog_stride - 1) / fog_stride;
+    int column_start = column_count * range_index / range_count;
+    int column_end = column_count * (range_index + 1) / range_count;
 
-    for (int x = 0; x < SCREEN_W; x += fog_stride) {
+    for (int column = column_start; column < column_end; ++column) {
+        int x = column * fog_stride;
         double wall_depth = z_buffer[x];
         double camera_x = 2.0 * x / (double)SCREEN_W - 1.0;
         double ray_dir_x = cam->dir.x + cam->plane.x * camera_x;
@@ -4309,6 +4471,20 @@ static void render_volumetric_fog(const Camera *cam, const GameState *game)
                 }
             }
         }
+    }
+}
+
+static void render_volumetric_fog(const Camera *cam, const GameState *game)
+{
+    render_parallel_ranges(RENDER_JOB_VOLUMETRIC_FOG, render_worker_range_count(), cam, game);
+}
+
+static void render_job_range(int job, int range_index, int range_count, const Camera *cam, const GameState *game)
+{
+    if (job == RENDER_JOB_FLOOR_CEILING) {
+        render_floor_ceiling_range(cam, game, range_index, range_count);
+    } else if (job == RENDER_JOB_VOLUMETRIC_FOG) {
+        render_volumetric_fog_range(cam, game, range_index, range_count);
     }
 }
 
@@ -6010,6 +6186,9 @@ static void render_scene(const Camera *cam, const GameState *game)
     }
 
     prepare_torch_flicker_cache(game->time);
+    if (!fog_lut_ready) {
+        build_fog_luts();
+    }
     if (game->generator_mode == GENERATOR_FOREST && !moon_visibility_cache_ready) {
         build_moon_visibility_cache();
     }
@@ -12100,19 +12279,59 @@ static int parse_generator_mode_name(const char *text, int *out_mode)
     return 0;
 }
 
-static int profile_dump_frame(const char *path, int quality, int mode)
+static int parse_render_thread_count(const char *text, int *out_threads)
+{
+    char *end = NULL;
+    long value = strtol(text, &end, 10);
+    if (end == text || *end != '\0' || value < 1 || value > MAX_RENDER_THREADS) {
+        return 0;
+    }
+    *out_threads = (int)value;
+    return 1;
+}
+
+static int profile_dump_frame(const char *path, int quality, int mode, int threads)
 {
     RenderProfile profile;
     int previous_quality = render_quality;
     RenderProfile *previous_profile = active_profile;
+    int previous_threads = render_thread_count;
+    int sdl_timer_started = 0;
+#ifdef __EMSCRIPTEN__
+    threads = 1;
+#else
+    if (threads > 1) {
+        if (SDL_Init(SDL_INIT_TIMER) != 0) {
+            fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+            return 1;
+        }
+        sdl_timer_started = 1;
+        if (!init_render_workers(threads)) {
+            SDL_QuitSubSystem(SDL_INIT_TIMER);
+            return 1;
+        }
+    } else {
+        render_thread_count = 1;
+    }
+#endif
     render_quality = quality;
     active_profile = &profile;
     int result = dump_frame_mode(path, mode);
     active_profile = previous_profile;
     render_quality = previous_quality;
+#ifndef __EMSCRIPTEN__
+    shutdown_render_workers();
+    render_thread_count = previous_threads;
+    if (sdl_timer_started) {
+        SDL_QuitSubSystem(SDL_INIT_TIMER);
+    }
+#else
+    render_thread_count = previous_threads;
+#endif
     if (result == 0) {
         fprintf(stderr,
-                "profile total=%.3f floor=%.3f wall=%.3f sprite=%.3f fog=%.3f bloom=%.3f post=%.3f\n",
+                "profile threads=%d total=%.3f floor=%.3f wall=%.3f sprite=%.3f fog=%.3f bloom=%.3f post=%.3f\n",
+                threads,
                 profile.total_ms,
                 profile.floor_ms,
                 profile.wall_ms,
@@ -12177,6 +12396,7 @@ typedef struct {
     int sfx_volume;
     int music_volume;
     int trainer;
+    int render_threads;
     const char *scale_quality;
 } RuntimeConfig;
 
@@ -12737,6 +12957,7 @@ static void init_runtime_config_defaults(RuntimeConfig *config)
     config->sfx_volume = DEFAULT_SFX_VOLUME_STEP;
     config->music_volume = DEFAULT_MUSIC_VOLUME_STEP;
     config->trainer = 0;
+    config->render_threads = 0;
     config->scale_quality = "nearest";
 }
 
@@ -12858,6 +13079,7 @@ static int parse_runtime_config(int argc, char **argv, RuntimeConfig *config)
     load_runtime_settings(config);
 #ifdef __EMSCRIPTEN__
     config->fullscreen = 0;
+    config->render_threads = 1;
 #endif
 
     for (int i = 1; i < argc; ++i) {
@@ -12887,6 +13109,12 @@ static int parse_runtime_config(int argc, char **argv, RuntimeConfig *config)
                 return 0;
             }
             i += 1;
+        } else if (strcmp(argv[i], "--render-threads") == 0) {
+            if (i + 1 >= argc || !parse_render_thread_count(argv[i + 1], &config->render_threads)) {
+                fprintf(stderr, "error: --render-threads expects an integer from 1 to %d\n", MAX_RENDER_THREADS);
+                return 0;
+            }
+            i += 1;
         } else {
             fprintf(stderr, "error: unknown option %s\n", argv[i]);
             return 0;
@@ -12902,6 +13130,9 @@ static void shutdown_runtime(Runtime *rt)
         save_runtime_settings(rt);
         rt->settings_ready = 0;
     }
+#ifndef __EMSCRIPTEN__
+    shutdown_render_workers();
+#endif
     if (rt->screen) {
         SDL_DestroyTexture(rt->screen);
         rt->screen = NULL;
@@ -12939,6 +13170,15 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 0;
     }
+#ifndef __EMSCRIPTEN__
+    int worker_threads = config->render_threads > 0 ? config->render_threads : default_render_thread_count();
+    if (!init_render_workers(worker_threads)) {
+        SDL_Quit();
+        return 0;
+    }
+#else
+    render_thread_count = 1;
+#endif
 #ifdef __EMSCRIPTEN__
     SDL_EventState(SDL_JOYAXISMOTION, SDL_IGNORE);
     SDL_EventState(SDL_JOYBALLMOTION, SDL_IGNORE);
@@ -12955,6 +13195,9 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
     SDL_EventState(SDL_CONTROLLERDEVICEREMAPPED, SDL_IGNORE);
 #endif
     if (!init_audio()) {
+#ifndef __EMSCRIPTEN__
+        shutdown_render_workers();
+#endif
         SDL_Quit();
         return 0;
     }
@@ -12974,8 +13217,7 @@ static int init_runtime(Runtime *rt, const RuntimeConfig *config)
         window_flags);
     if (!rt->window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
-        shutdown_audio();
-        SDL_Quit();
+        shutdown_runtime(rt);
         return 0;
     }
 
@@ -13336,9 +13578,10 @@ int main(int argc, char **argv)
         }
         return dump_frame_quality(argv[3], quality);
     }
-    if (argc == 5 && strcmp(argv[1], "--profile-dump") == 0) {
+    if ((argc == 5 || argc == 7) && strcmp(argv[1], "--profile-dump") == 0) {
         int quality = RENDER_QUALITY_PBR;
         int mode = GENERATOR_ROOMS;
+        int threads = 1;
         if (!parse_render_quality(argv[2], &quality)) {
             fprintf(stderr, "error: --profile-dump expects pbr or fast quality\n");
             return 1;
@@ -13347,7 +13590,13 @@ int main(int argc, char **argv)
             fprintf(stderr, "error: --profile-dump expects rooms, forest, tight, boss, or house mode\n");
             return 1;
         }
-        return profile_dump_frame(argv[4], quality, mode);
+        if (argc == 7) {
+            if (strcmp(argv[5], "--render-threads") != 0 || !parse_render_thread_count(argv[6], &threads)) {
+                fprintf(stderr, "error: --profile-dump optional tail is --render-threads 1..%d\n", MAX_RENDER_THREADS);
+                return 1;
+            }
+        }
+        return profile_dump_frame(argv[4], quality, mode, threads);
     }
     if (argc == 3 && strcmp(argv[1], "--dump-house") == 0) {
         return dump_frame_mode(argv[2], GENERATOR_HOUSE);

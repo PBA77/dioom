@@ -56,7 +56,7 @@ Main renderer features:
 - Renderer pass profiling under `F4` and `--profile-dump`: total, floor, wall, sprite, fog, bloom, and post.
 - Headless render dumps: `make dump`, `--dump`, `--dump-house`, `--dump-quality`, and `--profile-dump` write deterministic PPM frames for regression checks.
 
-Heavier post-processing passes can be changed with `--effects full`, `--effects preset2`, `--effects preset3`, or from the settings menu. Render quality can be set with `--quality pbr|fast` or from the menu.
+Heavier post-processing passes can be changed with `--effects full`, `--effects preset2`, `--effects preset3`, or from the settings menu. Render quality can be set with `--quality pbr|fast` or from the menu. Native SDL2 builds use a small render worker pool by default; force a specific count with `--render-threads N` from 1 to 16. WASM stays single-threaded.
 
 ## Build
 
@@ -131,4 +131,10 @@ To inspect a shrine interior, render a separate frame:
 
 ```sh
 ./dioom --dump-house /tmp/house.ppm
+```
+
+To profile a deterministic frame with a specific render thread count:
+
+```sh
+./dioom --profile-dump pbr forest /tmp/forest.ppm --render-threads 6
 ```
