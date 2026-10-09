@@ -1,0 +1,226 @@
+{
+  "provider": "ElevenLabs",
+  "model_id": "eleven_text_to_sound_v2",
+  "generated_at": "2026-10-09T07:08:31.448497+00:00",
+  "api_documentation": "https://elevenlabs.io/docs/api-reference/text-to-sound-effects/convert",
+  "source_format": "mp3_44100_128",
+  "runtime_format": "44100 Hz mono signed 16-bit PCM WAV",
+  "effects": [
+    {
+      "name": "pistol",
+      "request": {
+        "text": "One single heavy old pistol gunshot, immediate sharp metallic crack and deep punch, tiny mechanical click, short dry decay. Close isolated game weapon effect, no other shots. Start immediately, exactly one event. Sound effect only: no music, melody, speech, narration, background ambience, or repeated actions. Cohesive gothic horror first person game sound palette. Clean recording.",
+        "model_id": "eleven_text_to_sound_v2",
+        "duration_seconds": 0.6,
+        "prompt_influence": 0.45,
+        "loop": false
+      },
+      "character_cost": "6",
+      "request_id": null,
+      "duration_seconds": 0.6,
+      "trim_start_seconds": 0.0,
+      "peak_dbfs": -3.1,
+      "rms_dbfs": -20.26,
+      "sha256": "a9107db63ba94006532eb6a468554dd41d3fb896ab5342709f1688bdf2b779fe",
+      "source_sha256": "ed96fff74f580d8e32d64814ebb727e00344ae4adbe0e861f3886170c40d9037"
+    },
+    {
+      "name": "fireball",
+      "request": {
+        "text": "One fast magical fireball cast: immediate aggressive flame whoosh and sizzling ember snap, short low rush, quick decay. Isolated dark fantasy weapon effect. Start immediately, exactly one event. Sound effect only: no music, melody, speech, narration, background ambience, or repeated actions. Cohesive gothic horror first person game sound palette. Clean recording.",
+        "model_id": "eleven_text_to_sound_v2",
+        "duration_seconds": 0.8,
+        "prompt_influence": 0.45,
+        "loop": false
+      },
+      "character_cost": "8",
+      "request_id": null,
+      "duration_seconds": 0.5653,
+      "trim_start_seconds": 0.0,
+      "peak_dbfs": -3.1,
+      "rms_dbfs": -18.49,
+      "sha256": "8388f81de21c355255c195a99e2a765614a5029da2574c2e5c4fee961e1395b9",
+      "source_sha256": "db90290dae47ddb4a65fb4619ce502182c963d49892df17d2d2dab9148259f15"
+    },
+    {
+      "name": "explosion",
+      "request": {
+        "text": "One compact infernal fireball impact explosion: immediate deep blast, brittle stone debris and hot crackling embers, short dark cavern tail. Powerful close game impact. Start immediately, exactly one event. Sound effect only: no music, melody, speech, narration, background ambience, or repeated actions. Cohesive gothic horror first person game sound palette. Clean recording.",
+        "model_id": "eleven_text_to_sound_v2",
+        "duration_seconds": 1.4,
+        "prompt_influence": 0.45,
+        "loop": false
+      },
+      "character_cost": "14",
+      "request_id": null,
+      "duration_seconds": 1.1659,
+      "trim_start_seconds": 0.0,
+      "peak_dbfs": -3.1,
+      "rms_dbfs": -20.85,
+      "sha256": "4c71352b22817f1025f767cd2ac9913e4d23a52d266cf9a8953a71a3f71cc842",
+      "source_sha256": "07e6c1d1a7d20d14a64cd618054a411604cd06ac497e50488d8d9b0419f9f54c"
+    },
+    {
+      "name": "pickup",
+      "request": {
+        "text": "One small old coin or ammunition pickup: immediate crisp metallic clink, two tiny descending clicks and a subtle warm glint. Very short, tactile isolated game pickup. Start immediately, exactly one event. Sound effect only: no music, melody, speech, narration, background ambience, or repeated actions. Cohesive gothic horror first person game sound palette. Clean recording.",
+        "model_id": "eleven_text_to_sound_v2",
+        "duration_seconds": 0.5,
+        "prompt_influence": 0.45,
+        "loop": false
+      },
+      "character_cost": "5",
+      "request_id": null,
+      "duration_seconds": 0.48,
+      "trim_start_seconds": 0.0,
+      "peak_dbfs": -4.79,
+      "rms_dbfs": -24.02,
+      "sha256": "adeb104bf1613d3365b32772fb9e2c5615789a6e020fa57178500be9c2dce0df",
+      "source_sha256": "8820549b0a0170cc83c9dbd3e000e494a33a4f46eedd4ffd99c7f77b2c089590"
+    },
+    {
+      "name": "hurt",
+      "request": {
+        "text": "One wounded undead creature pain reaction, immediate coarse breathy snarl and bone creak, brief and rough, restrained guttural sound. Single isolated nonverbal reaction, no words. Start immediately, exactly one event. Sound effect only: no music, melody, speech, narration, background ambience, or repeated actions. Cohesive gothic horror first person game sound palette. Clean recording.",
+        "model_id": "eleven_text_to_sound_v2",
+        "duration_seconds": 0.8,
+        "prompt_influence": 0.45,
+        "loop": false
+      },
+      "character_cost": "8",
+      "request_id": null,
+      "duration_seconds": 0.6746,
+      "trim_start_seconds": 0.0,
+      "peak_dbfs": -3.1,
+      "rms_dbfs": -16.64,
+      "sha256": "a8371719a634d53cff2f230e68e2dc4670860e7b18dccbae803605af55696b7b",
+      "source_sha256": "fcf510e4fcbb373cd26f01fe2bfab30b6a18c0e47d23d6a1b7ebd04c3b562815"
+    },
+    {
+      "name": "death",
+      "request": {
+        "text": "One undead creature death: immediate low guttural exhale, dry bones collapsing onto stone and a fading ghostly rasp. Single isolated dark fantasy death, no words. Start immediately, exactly one event. Sound effect only: no music, melody, speech, narration, background ambience, or repeated actions. Cohesive gothic horror first person game sound palette. Clean recording.",
+        "model_id": "eleven_text_to_sound_v2",
+        "duration_seconds": 1.5,
+        "prompt_influence": 0.45,
+        "loop": false
+      },
+      "character_cost": "15",
+      "request_id": null,
+      "duration_seconds": 1.3493,
+      "trim_start_seconds": 0.0,
+      "peak_dbfs": -3.1,
+      "rms_dbfs": -16.92,
+      "sha256": "3ec7233da5651b48f9b30f85bd786c1807f36e1222c1a76bb663253bf061b548",
+      "source_sha256": "e3a1cbe3171fec88649a26be377e54c8a52c7afce8fea3e9c453f6e7c34ba29b"
+    },
+    {
+      "name": "melee",
+      "request": {
+        "text": "One knife slash hitting a rotten creature: immediate quick blade swish, dense sharp flesh impact and tiny bone crack, very short dry close effect. One strike only. Start immediately, exactly one event. Sound effect only: no music, melody, speech, narration, background ambience, or repeated actions. Cohesive gothic horror first person game sound palette. Clean recording.",
+        "model_id": "eleven_text_to_sound_v2",
+        "duration_seconds": 0.6,
+        "prompt_influence": 0.45,
+        "loop": false
+      },
+      "character_cost": "6",
+      "request_id": null,
+      "duration_seconds": 0.3644,
+      "trim_start_seconds": 0.0,
+      "peak_dbfs": -3.1,
+      "rms_dbfs": -19.4,
+      "sha256": "81f3b659ede1d6e99e479013c3b0faa80432155fb7867a16a8681fff2f2ad651",
+      "source_sha256": "1f8ec0d8f9acd1de34790975f1cc6dfea1a063f6b3034eac2fdd54bf201bfb46"
+    },
+    {
+      "name": "portal",
+      "request": {
+        "text": "One ancient crypt portal opening: immediate low stone resonance swelling into a cold spectral rush, iron chains vibrating and a short hollow wind tail. Ominous gothic game transition. Start immediately, exactly one event. Sound effect only: no music, melody, speech, narration, background ambience, or repeated actions. Cohesive gothic horror first person game sound palette. Clean recording.",
+        "model_id": "eleven_text_to_sound_v2",
+        "duration_seconds": 2.3,
+        "prompt_influence": 0.45,
+        "loop": false
+      },
+      "character_cost": "23",
+      "request_id": null,
+      "duration_seconds": 1.713,
+      "trim_start_seconds": 0.0437,
+      "peak_dbfs": -3.1,
+      "rms_dbfs": -17.2,
+      "sha256": "41d484d266f26bb2ef50d59a33f2c077db427a9ffced852da291d44a24fd3ac3",
+      "source_sha256": "eeb5eea9f89a337880d21cc7c67b34668454916ae83ab41c92eddf83eee930e3"
+    },
+    {
+      "name": "door",
+      "request": {
+        "text": "One heavy ancient wooden dungeon door opening: immediate rusty latch clack, strained low timber creak and brief stone scrape, ending in a soft heavy thud. One isolated door action. Start immediately, exactly one event. Sound effect only: no music, melody, speech, narration, background ambience, or repeated actions. Cohesive gothic horror first person game sound palette. Clean recording.",
+        "model_id": "eleven_text_to_sound_v2",
+        "duration_seconds": 1.3,
+        "prompt_influence": 0.45,
+        "loop": false
+      },
+      "character_cost": "13",
+      "request_id": null,
+      "duration_seconds": 0.7214,
+      "trim_start_seconds": 0.0,
+      "peak_dbfs": -3.1,
+      "rms_dbfs": -23.97,
+      "sha256": "bf2fd6e5244e273b7e5c90e8ce2cc9e7f17b1a9b4ca11858aca0a46e99f11fb8",
+      "source_sha256": "cd71bd50279b293817dbcf6d7a9bc7594b63f0ecadac44a904338d39c12eb2c0"
+    },
+    {
+      "name": "locked",
+      "request": {
+        "text": "One forbidden ritual rejected: immediate dissonant cracked bronze bell hit, low ominous shudder and a brief distant breath-like wind rasp. Clear short negative game feedback, no voices or words. Start immediately, exactly one event. Sound effect only: no music, melody, speech, narration, background ambience, or repeated actions. Cohesive gothic horror first person game sound palette. Clean recording.",
+        "model_id": "eleven_text_to_sound_v2",
+        "duration_seconds": 1.2,
+        "prompt_influence": 0.45,
+        "loop": false
+      },
+      "character_cost": "12",
+      "request_id": null,
+      "duration_seconds": 0.5028,
+      "trim_start_seconds": 0.0,
+      "peak_dbfs": -3.1,
+      "rms_dbfs": -24.9,
+      "sha256": "77e87981a422b847c80e43d7535503eeb3f6d47cbcd9af1de4a6e8ab7dadc920",
+      "source_sha256": "763a9f2a472fb1a93abacd3d10cc51acd4c2350bb908a709baf8d76bd8d31c56"
+    },
+    {
+      "name": "relic",
+      "request": {
+        "text": "One ancient bell fragment freed from a seal: immediate deep beautiful bronze bell strike with a faint crystalline overtone, lifting spectral resonance and a slow dark reverberant decay. Solemn gothic revelation, one event. Start immediately, exactly one event. Sound effect only: no music, melody, speech, narration, background ambience, or repeated actions. Cohesive gothic horror first person game sound palette. Clean recording.",
+        "model_id": "eleven_text_to_sound_v2",
+        "duration_seconds": 2.5,
+        "prompt_influence": 0.45,
+        "loop": false
+      },
+      "character_cost": "25",
+      "request_id": null,
+      "duration_seconds": 2.3156,
+      "trim_start_seconds": 0.0,
+      "peak_dbfs": -3.1,
+      "rms_dbfs": -19.32,
+      "sha256": "07868c3cd4b46bb5a7ee99f79f015ea5f32dea2533acef4374694dcdc955bb62",
+      "source_sha256": "4479867d63a2f4c8c779726b2b1f5e728ba1bd9110f64be87a9fdaba610a4d75"
+    },
+    {
+      "name": "shrine",
+      "request": {
+        "text": "One correct ritual stone activation: immediate small low bronze chime and stone vibration, warm ghostly hum blooming briefly then fading. Subtle mysterious positive feedback, clearly gentler than a full bell. Start immediately, exactly one event. Sound effect only: no music, melody, speech, narration, background ambience, or repeated actions. Cohesive gothic horror first person game sound palette. Clean recording.",
+        "model_id": "eleven_text_to_sound_v2",
+        "duration_seconds": 1.5,
+        "prompt_influence": 0.45,
+        "loop": false
+      },
+      "character_cost": "15",
+      "request_id": null,
+      "duration_seconds": 1.48,
+      "trim_start_seconds": 0.0,
+      "peak_dbfs": -3.29,
+      "rms_dbfs": -22.31,
+      "sha256": "ade7293864cc4330ff2828081942dea70c244ee18b61ca65d4e375e5ba2c9a7d",
+      "source_sha256": "5da502eda45ab4644b252c90bb6b26bf4a00eb3c1c5700efe7fa55219b4f4542"
+    }
+  ]
+}

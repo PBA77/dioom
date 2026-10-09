@@ -1,0 +1,6 @@
+Generated using the built-in ImageGen tool.
+
+Use case: stylized-concept. Asset type: production 3-cell sprite atlas for a Doom-inspired gothic horror C software FPS. Transparent background. Exactly three equally spaced square cells in a single horizontal row, 3:1 aspect ratio, each cell contains ONE isolated front-facing ritual stone pedestal, full object visible, centered, identical base width and apparent height, feet aligned at the bottom of each cell. Left cell: weathered gray stone pedestal bearing a little ceramic urn full of pale ash, a pale amber etched sun rune on its front. Middle cell: weathered gray stone pedestal bearing a shallow bowl of dark red blood, a crimson etched drop rune on its front. Right cell: weathered gray stone pedestal bearing a human skull and small bones, a pale ivory etched crescent rune on its front. Style crisp coarse pixel art like a 1990s dark fantasy first person shooter, readable silhouettes at 32x32 pixels per cell, gray stone with strong dark outlines and restrained rune highlights. No labels, text, scene, floor plane, ground shadow outside the pedestal, frame, borders or extra objects. Pedestals are ritual puzzle interactions, not enemies.
+
+Runtime preparation: nearest-neighbor resize to 96x32, three 32x32 cells.
+PNG preserves transparency; RGB P6 PPM uses #ff00ff for alpha below 128.

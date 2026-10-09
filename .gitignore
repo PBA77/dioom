@@ -18,3 +18,9 @@ frame_forest.ppm
 frame_forest.png
 web-vercel-check*.png
 .DS_Store
+src/.env
+tools/meshy/state.json
+tools/meshy/state-v2.json
+tools/meshy/state-trees-v1.json
+
+/build/

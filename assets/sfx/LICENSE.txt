@@ -1,8 +1,17 @@
-80 CC0 RPG SFX
-Author: rubberduck
-Source: https://opengameart.org/content/80-cc0-rpg-sfx
-License: CC0 1.0 Universal
+Dioom runtime sound effects — ElevenLabs generation
 
-Only selected sounds are bundled here, converted from the original OGG files to 44.1 kHz mono signed 16-bit WAV for SDL_LoadWAV.
+All twelve WAV effects in this directory were generated with ElevenLabs
+Sound Effects (eleven_text_to_sound_v2) on 2026-10-09 for this project.
+These generated recordings are not distributed under the former CC0 label.
+Usage is governed by the ElevenLabs terms applicable to the generating account:
+https://elevenlabs.io/terms-of-use
 
-door.wav is locally synthesized for this project as a 44.1 kHz mono signed 16-bit PCM creak sound.
+Prompts, request identifiers, reported generation cost, processing details,
+and checksums: elevenlabs-generation.json.
+Original generated MP3 recordings: elevenlabs-source/.
+Runtime WAVs: 44.1 kHz mono signed 16-bit PCM, silence trimmed, brief boundary
+fades and peak normalized to 0.70 full scale. No speech or music was requested.
+
+The former bank used selected rubberduck "80 CC0 RPG SFX" recordings
+(https://opengameart.org/content/80-cc0-rpg-sfx), plus a locally synthesized door.
+Those recordings have been replaced in the runtime bank.

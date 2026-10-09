@@ -2,9 +2,14 @@
 
 ## What This Project Is
 
-This repository is a small C/SDL2 software raycaster inspired by Wolfenstein-style rendering, with dark dungeon/forest mood and arcade combat. The main implementation is intentionally kept in one C file:
+This repository is a small C/SDL2 software raycaster inspired by Wolfenstein-style rendering, with dark dungeon/forest mood and arcade combat. The implementation is split into separately compiled C modules:
 
-- `src/main.c`: game loop, software renderer, level generation, AI, combat, pickups, HUD, audio, validation, and dump mode.
+- `src/main.c`: entry point and command dispatch.
+- `src/runtime.c`, `src/ui.c`, `src/savegame.c`: SDL lifecycle/input, UI, settings, and saves.
+- `src/renderer.c`, `src/render_sprites.c`, `src/render_effects.c`: world rendering, sprites/shadows, fog/post-processing.
+- `src/world.c`, `src/gameplay.c`, `src/story.c`: generation/collision, combat/AI, puzzles/journal.
+- `src/audio.c`, `src/assets.c`, `src/validation.c`: audio, asset loading, deterministic tests/dumps.
+- `src/dioom.h`: shared data layouts and module interfaces.
 - `assets/`: required runtime assets. PPM atlases are loaded by the C game; PNG source/preview files are kept alongside them. WAV files in `assets/sfx/` are required for audio.
 - `Makefile`: builds `dioom` and provides `make dump` for deterministic validation/render output.
 
@@ -42,7 +47,7 @@ SDL2_PREFIX=/opt/homebrew/opt/sdl2 make
 
 ## Development Notes
 
-- Prefer small, direct edits that match the current single-file architecture.
+- Prefer small, direct edits in the module that owns the behavior. Keep module-private helpers and storage static; do not include implementation `.c` files.
 - Keep generated gameplay deterministic where validation depends on `LEVEL_TEST_SEED`.
 - Preserve existing asset formats and atlas conventions unless the task explicitly changes them.
 - Do not introduce a new engine, framework, asset pipeline, or project structure unless the user explicitly asks for it.

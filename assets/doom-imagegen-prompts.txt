@@ -1,0 +1,12 @@
+Generated with the built-in ImageGen tool for the C/SDL2 Doom-style update.
+
+TEXTURE ATLAS
+Use case: stylized-concept. Asset type: production texture atlas for a C software FPS, Doom 1993-inspired gritty pixel art, dark gothic dungeon and forest. Generate a perfectly aligned 4 columns by 3 rows contact sheet of square seamless texture tiles, no margins, gutters, borders, labels or text. Orthographic flat material swatches only, no perspective or objects. Each tile has coarse crisp pixel detailing designed to reduce to 64x64. Row 1 left to right: gray weathered stone brick wall; rusty riveted iron wall panel; green mossy dungeon stone wall; red brown infernal brick wall. Row 2 left to right: dark mossy rock cliff face; dark forest earth and roots floor viewed straight down; gray brown dungeon stone paving floor viewed straight down; dark ribbed stone ceiling flat swatch. Row 3 left to right: closed brown metal dungeon door with vertical ribs; locked blood red iron door with skull relief centered; spare charcoal stone swatch; spare rusty stone swatch. Muted readable middle-value materials, rusty orange and olive accents, deep dark seams, hand-painted crunchy 1990s FPS pixel-art shading. No modern PBR gloss, no text, no logos, no weapons, no characters. Entire image exact 4:3 aspect ratio, equal tile sizes.
+
+HUD BACKGROUND
+Use case: stylized-concept. Asset type: Doom-inspired 1990s pixel art FPS status bar background, flat 2D bitmap for a dark dungeon and forest game. A very wide short horizontal steel and stone panel, exact aspect ratio 10:1. Full bleed panel fills every pixel. Gritty gray hammered metal, bevelled outer rim, rivets, a little rusty dark red trim. Five equally spaced recessed dark charcoal rectangular wells across the strip, suited to overlaying game stats; subtle dividers between wells. Center well has only a small embossed skull ornament near the bottom edge, upper part empty for a weapon label. No text, letters, numbers, icons, portraits, scenery, gradients outside panel, or transparency. Strong coarse crisp pixel art designed for a 640x64 bitmap. Readable flat dark surfaces where text will be placed; muted classic Doom status bar mood.
+
+Runtime preparation: texture atlas resized with nearest-neighbor sampling to
+256x192 (4x3 tiles of 64x64); HUD panel cropped from its source letterboxing
+and resized with nearest-neighbor sampling to 640x64. RGB P6 PPM files are
+required at runtime. Source and runtime PNGs are kept beside them.
