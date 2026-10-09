@@ -36,6 +36,14 @@ int main(int argc, char **argv)
         }
         return profile_dump_frame(argv[4], quality, mode);
     }
+    if ((argc == 2 || argc == 3) && strcmp(argv[1], "--bench") == 0) {
+        int frames = argc == 3 ? atoi(argv[2]) : 300;
+        if (frames < 1) {
+            fprintf(stderr, "error: --bench expects a positive frame count\n");
+            return 1;
+        }
+        return bench_render(frames);
+    }
     if (argc == 3 && strcmp(argv[1], "--dump-house") == 0) {
         return dump_frame_mode(argv[2], GENERATOR_HOUSE);
     }

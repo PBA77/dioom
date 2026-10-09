@@ -162,6 +162,15 @@ vercel deploy web --prod --yes
 
 Menu settings are saved to `dioom.ini` on exit and after option changes. Supported keys are `difficulty=easy|normal|hard|nightmare`, `quality=fast`, `post_process=full|off`, `fullscreen=0|1`, `sfx_volume=0..8`, `music_volume=0..8`, and hidden `trainer=0|1`. Trainer blocks player damage, prevents ammo and fireball ammo consumption, and starts with all four relics.
 
+## Benchmark
+
+`make bench` renders 300 steady-state frames per scene (forest, rooms, house) with post-processing off and preset3, and prints the average frame time, per-pass timings, and a hash of the final frame. `make bench-wasm` builds the same sources with the web bundle's `WASM_CFLAGS` and runs the identical benchmark in Node (V8), so matching hashes confirm both builds render the same image. `BENCH_FRAMES=...` changes the frame count and `WASM_CFLAGS=...` lets you try other Emscripten flags.
+
+```sh
+make bench
+make bench-wasm
+```
+
 ## Render test
 
 You can save a single frame without opening a window:

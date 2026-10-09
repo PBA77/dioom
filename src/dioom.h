@@ -1186,6 +1186,7 @@ int dump_frame_quality(const char *path, int quality);
 int parse_generator_mode_name(const char *text, int *out_mode);
 int profile_dump_frame(const char *path, int quality, int mode);
 int dump_forest_forward_frames(const char *prefix);
+int bench_render(int frames);
 
 /* savegame */
 void save_slot_menu_label(int slot, char *out, size_t out_size);

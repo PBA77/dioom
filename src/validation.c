@@ -2499,6 +2499,67 @@ int profile_dump_frame(const char *path, int quality, int mode)
     return result;
 }
 
+static double bench_now_ms(void)
+{
+    return (double)SDL_GetPerformanceCounter() * 1000.0 / (double)SDL_GetPerformanceFrequency();
+}
+
+/* Steady-state render benchmark shared by the native and wasm builds. The frame
+ * hash makes it obvious when an optimisation changes the rendered image. */
+int bench_render(int frames)
+{
+    static const int modes[] = {GENERATOR_FOREST, GENERATOR_ROOMS, GENERATOR_HOUSE};
+    static const char *mode_names[] = {"forest", "rooms", "house"};
+    static const int effects[] = {RENDER_EFFECTS_OFF, RENDER_EFFECTS_PRESET3};
+    static const char *effect_names[] = {"off", "preset3"};
+    if (!init_assets()) return 1;
+    int previous_effects = render_effects;
+    RenderProfile *previous_profile = active_profile;
+    RenderProfile profile;
+    active_profile = &profile;
+    double total_ms = 0.0;
+    printf("%-7s %-8s %8s %7s %6s %6s %6s %6s %6s %6s %10s\n",
+           "scene", "post", "frame_ms", "fps", "floor", "wall", "sprite", "fog", "bloom", "post", "hash");
+    for (int m = 0; m < 3; ++m) {
+        for (int e = 0; e < 2; ++e) {
+            Camera cam = {.pos = {2.5, 22.5}, .dir = {1.0, 0.0}, .plane = {0.0, 0.66}};
+            if (modes[m] == GENERATOR_HOUSE) cam.pos = (Vec2){8.35, 12.50};
+            GameState game;
+            memset(&story, 0, sizeof(story));
+            adaptive_reset();
+            init_game_seed(&game, LEVEL_TEST_SEED, modes[m]);
+            render_effects = effects[e];
+            reveal_fog(&game, &cam);
+            for (int i = 0; i < 45; ++i) update_game(&game, &cam, 1.0 / 60.0);
+            for (int i = 0; i < 10; ++i) render_scene(&cam, &game);
+            RenderProfile sum = {0};
+            double start = bench_now_ms();
+            for (int i = 0; i < frames; ++i) {
+                update_game(&game, &cam, 1.0 / 60.0);
+                render_scene(&cam, &game);
+                sum.floor_ms += profile.floor_ms;
+                sum.wall_ms += profile.wall_ms;
+                sum.sprite_ms += profile.sprite_ms;
+                sum.fog_ms += profile.fog_ms;
+                sum.bloom_ms += profile.bloom_ms;
+                sum.post_ms += profile.post_ms;
+            }
+            double frame_ms = (bench_now_ms() - start) / frames;
+            total_ms += frame_ms;
+            uint32_t hash = 2166136261u;
+            for (int i = 0; i < SCREEN_W * SCREEN_H; ++i) hash = (hash ^ framebuffer[i]) * 16777619u;
+            printf("%-7s %-8s %8.2f %7.0f %6.2f %6.2f %6.2f %6.2f %6.2f %6.2f %08x\n",
+                   mode_names[m], effect_names[e], frame_ms, 1000.0 / frame_ms,
+                   sum.floor_ms / frames, sum.wall_ms / frames, sum.sprite_ms / frames,
+                   sum.fog_ms / frames, sum.bloom_ms / frames, sum.post_ms / frames, hash);
+        }
+    }
+    printf("sum of averages %.2f ms\n", total_ms);
+    active_profile = previous_profile;
+    render_effects = previous_effects;
+    return 0;
+}
+
 int dump_forest_forward_frames(const char *prefix)
 {
     Camera cam = {

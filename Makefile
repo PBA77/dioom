@@ -5,6 +5,9 @@ EMSDK_PYTHON ?= /opt/homebrew/opt/python@3.14/bin/python3.14
 
 CFLAGS ?= -O2 -g -Wall -Wextra -std=c11
 CFLAGS += -flto
+WASM_CFLAGS ?= $(filter-out -flto,$(CFLAGS))
+BENCH_FRAMES ?= 300
+BENCH_WASM := build/bench-wasm/dioom.js
 CPPFLAGS += -I$(SDL2_PREFIX)/include
 LDFLAGS += -L$(SDL2_PREFIX)/lib
 LDLIBS += -lSDL2 -lm
@@ -23,7 +26,7 @@ WEB_SHELL := $(WEB_DIR)/shell.html
 WEB_ASSETS := $(shell find assets -type f)
 WEB_SETTINGS := $(WEB_DIR)/dioom.ini
 
-.PHONY: all clean clean-wasm run dump hires run-hires dump-hires wasm check-emscripten
+.PHONY: all clean clean-wasm run dump hires run-hires dump-hires wasm check-emscripten bench bench-wasm
 
 all: $(TARGET)
 
@@ -55,6 +58,16 @@ dump-hires: $(HIRES_TARGET)
 
 wasm: check-emscripten $(WEB_TARGET)
 
+bench: $(TARGET)
+	./$(TARGET) --bench $(BENCH_FRAMES)
+
+# Same sources and WASM_CFLAGS as the web bundle, run headless in Node (V8).
+bench-wasm: check-emscripten
+	@command -v node >/dev/null 2>&1 || { echo "error: node not found; bench-wasm runs the wasm build in Node" >&2; exit 1; }
+	@mkdir -p $(dir $(BENCH_WASM))
+	EMSDK_PYTHON="$(EMSDK_PYTHON)" $(EMCC) $(WASM_CFLAGS) -sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 -sENVIRONMENT=node --embed-file assets@assets -o $(BENCH_WASM) $(SRC) -lm
+	node $(BENCH_WASM) --bench $(BENCH_FRAMES)
+
 check-emscripten:
 	@if ! command -v "$(EMCC)" >/dev/null 2>&1; then \
 		echo "error: emcc not found. Install Emscripten or run make wasm EMCC=/absolute/path/to/emcc" >&2; \
@@ -66,7 +79,7 @@ check-emscripten:
 	fi
 
 $(WEB_TARGET): $(SRC) $(HEADERS) $(WEB_SHELL) $(WEB_SETTINGS) $(WEB_ASSETS) | $(WEB_DIR)
-	EMSDK_PYTHON="$(EMSDK_PYTHON)" $(EMCC) $(filter-out -flto,$(CFLAGS)) -sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 --preload-file assets@assets --preload-file $(WEB_SETTINGS)@dioom.ini --shell-file $(WEB_SHELL) -o $@ $(SRC) -lm
+	EMSDK_PYTHON="$(EMSDK_PYTHON)" $(EMCC) $(WASM_CFLAGS) -sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 --preload-file assets@assets --preload-file $(WEB_SETTINGS)@dioom.ini --shell-file $(WEB_SHELL) -o $@ $(SRC) -lm
 
 $(WEB_DIR):
 	mkdir -p $@
